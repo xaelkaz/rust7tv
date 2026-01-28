@@ -25,6 +25,10 @@ impl CacheService {
         format!("trending:{}:{}:{}:{}", period, limit, page, animated_only)
     }
 
+    pub fn get_trending_sync_key(period: &str, animated_only: bool) -> String {
+        format!("trending_sync:{}:{}", period, animated_only)
+    }
+
     pub async fn get_from_cache(&self, key: &str) -> Option<Vec<u8>> {
         let mut conn = self.client.get_multiplexed_tokio_connection().await.ok()?;
         conn.get(key).await.ok()

@@ -6,7 +6,7 @@ use axum::{
 };
 use std::sync::Arc;
 use crate::AppState;
-use crate::models::{TrendingPeriod, SearchResponse};
+use crate::models::{TrendingPeriod, SearchResponse, SyncTrendingRequest, EmoteResponse};
 use serde::Deserialize;
 
 pub fn create_router(state: Arc<AppState>) -> Router {
@@ -15,6 +15,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/health", get(health_handler))
         .route("/api/search-emotes", post(search_emotes_handler))
         .route("/api/trending/emotes", get(trending_emotes_handler))
+        .route("/api/admin/sync-trending", post(sync_trending_handler))
+        .route("/api/trending/synced", get(synced_trending_emotes_handler))
         .with_state(state)
 }
 
@@ -157,4 +159,141 @@ async fn trending_emotes_handler(
         })
     }
 }
+}
+
+async fn sync_trending_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<SyncTrendingRequest>,
+) -> Json<SearchResponse> {
+    let animated_only = payload.animated_only.unwrap_or(false);
+    let period_str = payload.period.unwrap_or_else(|| "trending_weekly".to_string());
+    
+    let period = match period_str.as_str() {
+        "trending_daily" => TrendingPeriod::Daily,
+        "trending_monthly" => TrendingPeriod::Monthly,
+        "popularity" => TrendingPeriod::AllTime,
+        _ => TrendingPeriod::Weekly,
+    };
+
+    // Use limit from payload if provided, otherwise default to 100
+    let limit = payload.limit.unwrap_or(100);
+
+    // Define dynamic folder path: trending/{period}/{type}/
+    let type_str = if animated_only { "animated" } else { "static" };
+    let folder = format!("trending/{}/{}", period_str, type_str);
+
+    // 1. Cleanup existing blobs in that folder
+    if let Err(e) = state.storage.delete_blobs_by_prefix(&format!("{}/", folder)).await {
+        tracing::error!("Failed to cleanup Azure folder {}: {:?}", folder, e);
+        // We continue anyway, or maybe return error? 
+        // Let's return error to be safe as per user request of "not mixing"
+        return Json(SearchResponse {
+            success: false,
+            total_found: 0,
+            emotes: vec![],
+            message: Some(format!("Failed to cleanup existing emotes: {}", e)),
+            cached: Some(false),
+            processing_time: None,
+            page: None,
+            total_pages: None,
+            results_per_page: None,
+            has_next_page: None,
+        });
+    }
+
+    match state.seventv.fetch_trending_emotes(&period, limit, animated_only).await {
+        Ok(emotes) => {
+            let processed = state.seventv.process_emotes_batch(emotes, &folder).await;
+            
+            // Save to Redis with a special sync key and long TTL (e.g. 24 hours)
+            let sync_key = crate::services::cache::CacheService::get_trending_sync_key(&period_str, animated_only);
+            // 24 hours = 86400 seconds
+            let ttl = 86400; 
+            
+            if let Err(e) = state.cache.save_to_cache(&sync_key, &processed, ttl).await {
+                tracing::error!("Failed to save synced trending emotes to cache: {:?}", e);
+            }
+
+            Json(SearchResponse {
+                success: true,
+                total_found: processed.len() as i32,
+                emotes: processed,
+                message: Some("Synced successfully".to_string()),
+                cached: Some(false),
+                processing_time: None,
+                page: Some(1),
+                total_pages: Some(1),
+                results_per_page: Some(limit),
+                has_next_page: Some(false),
+            })
+        },
+        Err(e) => {
+            tracing::error!("Failed to sync trending emotes: {:?}", e);
+            Json(SearchResponse {
+                success: false,
+                total_found: 0,
+                emotes: vec![],
+                message: Some(e.to_string()),
+                cached: Some(false),
+                processing_time: None,
+                page: None,
+                total_pages: None,
+                results_per_page: None,
+                has_next_page: None,
+            })
+        }
+    }
+}
+
+async fn synced_trending_emotes_handler(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<TrendingQuery>,
+) -> Json<SearchResponse> {
+    let limit = params.limit.unwrap_or(20) as usize;
+    // No page param support in synced endpoint for now, or just implicit page 1
+    
+    let animated_only = params.animated_only.unwrap_or(false) || params.emote_type.as_deref() == Some("animated");
+    let period_str = params.period.unwrap_or_else(|| "trending_weekly".to_string());
+
+    let sync_key = crate::services::cache::CacheService::get_trending_sync_key(&period_str, animated_only);
+
+    if let Some(cached_data) = state.cache.get_from_cache(&sync_key).await {
+        if let Ok(all_emotes) = serde_json::from_slice::<Vec<EmoteResponse>>(&cached_data) {
+            let total = all_emotes.len();
+            let start_index = 0; 
+            let end_index = std::cmp::min(start_index + limit, total);
+            
+            let slice = if start_index < total {
+                all_emotes[start_index..end_index].to_vec()
+            } else {
+                vec![]
+            };
+
+            return Json(SearchResponse {
+                success: true,
+                total_found: slice.len() as i32,
+                emotes: slice,
+                message: None,
+                cached: Some(true),
+                processing_time: None,
+                page: Some(1),
+                total_pages: Some(1),
+                results_per_page: Some(limit as i32),
+                has_next_page: Some(false),
+            });
+        }
+    }
+
+    Json(SearchResponse {
+        success: false,
+        total_found: 0,
+        emotes: vec![],
+        message: Some("No synced data found. Please run admin sync.".to_string()),
+        cached: Some(false),
+        processing_time: None,
+        page: None,
+        total_pages: None,
+        results_per_page: None,
+        has_next_page: None,
+    })
 }

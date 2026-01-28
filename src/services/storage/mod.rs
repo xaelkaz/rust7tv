@@ -86,4 +86,31 @@ impl StorageService {
         Ok(format!("https://{}.blob.core.windows.net/{}/{}", 
             self.account_name, self.container_name, blob_name))
     }
+
+    pub async fn delete_blobs_by_prefix(
+        &self,
+        prefix: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let client = self.client.as_ref().ok_or("Azure Storage not initialized")?;
+        let container_client = client.container_client(&self.container_name);
+
+        let mut stream = container_client
+            .list_blobs()
+            .prefix(prefix.to_string())
+            .into_stream();
+
+        while let Some(value) = futures::StreamExt::next(&mut stream).await {
+            let resp = value?;
+            for blob in resp.blobs.blobs() {
+                container_client
+                    .blob_client(blob.name.clone())
+                    .delete()
+                    .into_future()
+                    .await?;
+                tracing::info!("Deleted blob: {}", blob.name);
+            }
+        }
+
+        Ok(())
+    }
 }

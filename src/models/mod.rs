@@ -66,3 +66,10 @@ impl Default for TrendingPeriod {
         Self::Weekly
     }
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SyncTrendingRequest {
+    pub period: Option<String>,
+    pub animated_only: Option<bool>,
+    pub limit: Option<i32>,
+}
