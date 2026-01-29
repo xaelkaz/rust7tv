@@ -312,7 +312,6 @@ impl SevenTVService {
               }
         }
         */
->>>>>>> 6efaf7c3b247ac8512c2a59e3ae3771f38f2c03b
         
         let gql = r#"
         query SearchEmotesInActiveSet($userId: Id!, $perPage: Int!) {
