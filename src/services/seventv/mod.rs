@@ -251,7 +251,68 @@ impl SevenTVService {
     ) -> Result<Vec<Emote>, Box<dyn std::error::Error + Send + Sync>> {
         tracing::info!("Fetching user emotes: user_id={}, limit={}", user_id, limit);
 
+        let gql = r#"
+        query SearchEmotesInActiveSet($userId: Id!, $query: String, $page: Int!, $isDefaultSetSet: Boolean!, $defaultSetId: Id!, $perPage: Int!) {
+          users {
+            user(id: $userId) {
+              style {
+                activeEmoteSet {
+                  id
+                  emotes(query: $query, page: $page, perPage: $perPage) {
+                    items {
+                      id
+                      defaultName
+                      owner {
+                        mainConnection {
+                          platformDisplayName
+                        }
+                      }
+                      images {
+                        url
+                        mime
+                        size
+                        scale
+                        width
+                        frameCount
+                      }
+                      animated: flags {
+                        animated: zeroWidth 
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        "#;
 
+        // Note: The original GraphQL query had "animated" inside flags? No, the user provided query uses "flags { zeroWidth }" but standard emote structure has "animated". 
+        // Actually, looking at the user payload, `animated` isn't directly on `items` -> `emote`. 
+        // Wait, the user provided query returns `items { emote { ... } }`, but my `Emote` struct is flat.
+        // The `SearchEmotesInActiveSet` query structure returning `items { emote { ... } }` is different from `fetch_trending_emotes` which returns `items { ... }` directly?
+        // Let's re-examine the user provided query carefully.
+        // It returns `items { emote { id ... } }`.
+        // However, my `Emote` struct expects fields at the top level.
+        // I should probably adjust the query aliases or post-process the JSON to match `Emote` struct, OR adapt `Emote` struct (but it's shared).
+        // Let's look at `fetch_trending_emotes` results. It returns a list of emotes.
+        // User query: `items` is a list of objects containing `emote`.
+        // I will write a custom struct for this response internally or just decode to Value and map. 
+        // Mapping is safer.
+        
+        // Re-writing the query to be simpler and closer to what we need if possible, OR just use the user provided one and parse manually.
+        // User provided one:
+        /*
+        items {
+              emote {
+                id
+                defaultName
+                owner { ... }
+                images { ... }
+              }
+        }
+        */
+>>>>>>> 6efaf7c3b247ac8512c2a59e3ae3771f38f2c03b
         
         let gql = r#"
         query SearchEmotesInActiveSet($userId: Id!, $perPage: Int!) {
