@@ -244,6 +244,143 @@ impl SevenTVService {
         Ok(emotes)
     }
 
+    pub async fn fetch_user_emotes(
+        &self,
+        user_id: &str,
+        limit: i32,
+    ) -> Result<Vec<Emote>, Box<dyn std::error::Error + Send + Sync>> {
+        tracing::info!("Fetching user emotes: user_id={}, limit={}", user_id, limit);
+
+        let gql = r#"
+        query SearchEmotesInActiveSet($userId: Id!, $query: String, $page: Int!, $isDefaultSetSet: Boolean!, $defaultSetId: Id!, $perPage: Int!) {
+          users {
+            user(id: $userId) {
+              style {
+                activeEmoteSet {
+                  id
+                  emotes(query: $query, page: $page, perPage: $perPage) {
+                    items {
+                      id
+                      defaultName
+                      owner {
+                        mainConnection {
+                          platformDisplayName
+                        }
+                      }
+                      images {
+                        url
+                        mime
+                        size
+                        scale
+                        width
+                        frameCount
+                      }
+                      animated: flags {
+                        animated: zeroWidth 
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        "#;
+
+        // Note: The original GraphQL query had "animated" inside flags? No, the user provided query uses "flags { zeroWidth }" but standard emote structure has "animated". 
+        // Actually, looking at the user payload, `animated` isn't directly on `items` -> `emote`. 
+        // Wait, the user provided query returns `items { emote { ... } }`, but my `Emote` struct is flat.
+        // The `SearchEmotesInActiveSet` query structure returning `items { emote { ... } }` is different from `fetch_trending_emotes` which returns `items { ... }` directly?
+        // Let's re-examine the user provided query carefully.
+        // It returns `items { emote { id ... } }`.
+        // However, my `Emote` struct expects fields at the top level.
+        // I should probably adjust the query aliases or post-process the JSON to match `Emote` struct, OR adapt `Emote` struct (but it's shared).
+        // Let's look at `fetch_trending_emotes` results. It returns a list of emotes.
+        // User query: `items` is a list of objects containing `emote`.
+        // I will write a custom struct for this response internally or just decode to Value and map. 
+        // Mapping is safer.
+        
+        // Re-writing the query to be simpler and closer to what we need if possible, OR just use the user provided one and parse manually.
+        // User provided one:
+        /*
+        items {
+              emote {
+                id
+                defaultName
+                owner { ... }
+                images { ... }
+              }
+        }
+        */
+        
+        let gql = r#"
+        query SearchEmotesInActiveSet($userId: Id!, $perPage: Int!) {
+          users {
+            user(id: $userId) {
+              style {
+                activeEmoteSet {
+                  emotes(page: 1, perPage: $perPage) {
+                    items {
+                      emote {
+                        id
+                        defaultName
+                        owner {
+                          mainConnection {
+                            platformDisplayName
+                          }
+                        }
+                        images {
+                            url
+                            mime
+                            size
+                            scale
+                            width
+                            frameCount
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        "#;
+
+        let variables = serde_json::json!({
+            "userId": user_id,
+            "perPage": limit,
+        });
+
+        let resp = self.client.post("https://api.7tv.app/v4/gql")
+            .header(CONTENT_TYPE, "application/json")
+            .json(&GqlRequest { query: gql, variables })
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let error_text = resp.text().await.unwrap_or_default();
+            return Err(format!("7TV API Error: {} - {}", status, error_text).into());
+        }
+
+        let body_text = resp.text().await?;
+        let body: serde_json::Value = serde_json::from_str(&body_text)?;
+        
+        // Traverse path: data.users.user.style.activeEmoteSet.emotes.items
+        let items_wrapper = body["data"]["users"]["user"]["style"]["activeEmoteSet"]["emotes"]["items"]
+            .as_array()
+            .ok_or("Invalid response format: missing emotes list")?;
+
+        // Extract "emote" field from each item to get the actual emote data
+        let emotes_json: Vec<serde_json::Value> = items_wrapper.iter()
+            .filter_map(|item| item.get("emote").cloned())
+            .collect();
+
+        let emotes: Vec<Emote> = serde_json::from_value(serde_json::Value::Array(emotes_json))?;
+        Ok(emotes)
+    }
+
     pub async fn process_emotes_batch(
         &self,
         emotes: Vec<Emote>,

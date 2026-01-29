@@ -73,3 +73,18 @@ pub struct SyncTrendingRequest {
     pub animated_only: Option<bool>,
     pub limit: Option<i32>,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncUserEmotesRequest {
+    pub user_id: String,
+    pub limit: Option<i32>,
+    pub folder_name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedUserEmotesQuery {
+    pub folder_name: String,
+    pub limit: Option<i32>,
+}

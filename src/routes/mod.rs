@@ -17,6 +17,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/trending/emotes", get(trending_emotes_handler))
         .route("/api/admin/sync-trending", post(sync_trending_handler))
         .route("/api/trending/synced", get(synced_trending_emotes_handler))
+        .route("/api/admin/sync-user-emotes", post(sync_user_emotes_handler))
+        .route("/api/user/emotes/saved", get(get_saved_user_emotes_handler))
         .with_state(state)
 }
 
@@ -289,6 +291,121 @@ async fn synced_trending_emotes_handler(
         total_found: 0,
         emotes: vec![],
         message: Some("No synced data found. Please run admin sync.".to_string()),
+        cached: Some(false),
+        processing_time: None,
+        page: None,
+        total_pages: None,
+        results_per_page: None,
+        has_next_page: None,
+    })
+}
+
+async fn sync_user_emotes_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<crate::models::SyncUserEmotesRequest>,
+) -> Json<SearchResponse> {
+    let limit = payload.limit.unwrap_or(100);
+    let folder = payload.folder_name;
+
+    // 1. Cleanup existing blobs in that folder
+    if let Err(e) = state.storage.delete_blobs_by_prefix(&format!("{}/", folder)).await {
+        tracing::error!("Failed to cleanup Azure folder {}: {:?}", folder, e);
+        return Json(SearchResponse {
+            success: false,
+            total_found: 0,
+            emotes: vec![],
+            message: Some(format!("Failed to cleanup existing emotes: {}", e)),
+            cached: Some(false),
+            processing_time: None,
+            page: None,
+            total_pages: None,
+            results_per_page: None,
+            has_next_page: None,
+        });
+    }
+
+    match state.seventv.fetch_user_emotes(&payload.user_id, limit).await {
+        Ok(emotes) => {
+            let processed = state.seventv.process_emotes_batch(emotes, &folder).await;
+            
+            // Save to Redis with a custom key: "user_emotes:{folder_name}"
+            let cache_key = format!("user_emotes:{}", folder);
+            let ttl = 86400 * 30; // 30 days retention for user syncs? or indefinite?
+            
+            if let Err(e) = state.cache.save_to_cache(&cache_key, &processed, ttl).await {
+                tracing::error!("Failed to save synced user emotes to cache: {:?}", e);
+            }
+
+            Json(SearchResponse {
+                success: true,
+                total_found: processed.len() as i32,
+                emotes: processed,
+                message: Some("User emotes synced successfully".to_string()),
+                cached: Some(false),
+                processing_time: None,
+                page: Some(1),
+                total_pages: Some(1),
+                results_per_page: Some(limit),
+                has_next_page: Some(false),
+            })
+        },
+        Err(e) => {
+            tracing::error!("Failed to sync user emotes: {:?}", e);
+            Json(SearchResponse {
+                success: false,
+                total_found: 0,
+                emotes: vec![],
+                message: Some(e.to_string()),
+                cached: Some(false),
+                processing_time: None,
+                page: None,
+                total_pages: None,
+                results_per_page: None,
+                has_next_page: None,
+            })
+        }
+    }
+}
+
+async fn get_saved_user_emotes_handler(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<crate::models::SavedUserEmotesQuery>,
+) -> Json<SearchResponse> {
+    let limit = params.limit.unwrap_or(100) as usize;
+    let cache_key = format!("user_emotes:{}", params.folder_name);
+
+    if let Some(cached_data) = state.cache.get_from_cache(&cache_key).await {
+        if let Ok(all_emotes) = serde_json::from_slice::<Vec<EmoteResponse>>(&cached_data) {
+            let total = all_emotes.len();
+            let start_index = 0; 
+            let end_index = std::cmp::min(start_index + limit, total);
+            
+            let slice = if start_index < total {
+                all_emotes[start_index..end_index].to_vec()
+            } else {
+                vec![]
+            };
+
+            return Json(SearchResponse {
+                success: true,
+                total_found: slice.len() as i32,
+                emotes: slice,
+                message: None,
+                cached: Some(true),
+                processing_time: None,
+                page: Some(1),
+                total_pages: Some(1),
+                results_per_page: Some(limit as i32),
+                has_next_page: Some(false),
+            });
+        }
+    }
+
+    Json(SearchResponse {
+        success: false,
+        total_found: 0,
+        emotes: vec![],
+        message: Some("No saved emotes found for this folder name".to_string()),
         cached: Some(false),
         processing_time: None,
         page: None,
