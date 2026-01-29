@@ -299,7 +299,7 @@ impl SevenTVService {
         // User query: `items` is a list of objects containing `emote`.
         // I will write a custom struct for this response internally or just decode to Value and map. 
         // Mapping is safer.
-        
+        //
         // Re-writing the query to be simpler and closer to what we need if possible, OR just use the user provided one and parse manually.
         // User provided one:
         /*
