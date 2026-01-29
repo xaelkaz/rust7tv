@@ -21,6 +21,8 @@ regex = "1.10"
 async-trait = "0.1"
 time = "=0.3.36"
 async-lock = "=3.4.0"
+sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio-rustls", "macros", "chrono"] }
+chrono = { version = "0.4.43", features = ["serde"] }
 
 [profile.release]
 lto = true
