@@ -7,6 +7,7 @@ use crate::config::Config;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use sqlx::postgres::PgPoolOptions;
 
 #[tokio::main]
 async fn main() {
@@ -17,6 +18,19 @@ async fn main() {
     let cfg = Config::from_env();
     let port = cfg.port.parse::<u16>().unwrap_or(8000);
     
+    // Database connection
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&cfg.database_url)
+        .await
+        .expect("Failed to connect to Postgres");
+
+    // Run migrations
+    sqlx::migrate!()
+        .run(&pool)
+        .await
+        .expect("Failed to run migrations");
+
     let storage = Arc::new(services::storage::StorageService::new(&cfg));
     let cache = Arc::new(services::cache::CacheService::new(&cfg));
     let seventv = Arc::new(services::seventv::SevenTVService::new(Arc::clone(&storage)));
@@ -26,6 +40,7 @@ async fn main() {
         storage,
         cache,
         seventv,
+        db: pool,
     };
 
     let shared_state = Arc::new(app_state);
@@ -44,4 +59,6 @@ pub struct AppState {
     pub storage: Arc<services::storage::StorageService>,
     pub cache: Arc<services::cache::CacheService>,
     pub seventv: Arc<services::seventv::SevenTVService>,
+    pub db: sqlx::Pool<sqlx::Postgres>,
 }
+

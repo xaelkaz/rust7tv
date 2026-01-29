@@ -7,7 +7,7 @@ use axum::{
 use std::sync::Arc;
 use crate::AppState;
 use crate::models::{TrendingPeriod, SearchResponse, SyncTrendingRequest, EmoteResponse};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
@@ -19,6 +19,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/trending/synced", get(synced_trending_emotes_handler))
         .route("/api/admin/sync-user-emotes", post(sync_user_emotes_handler))
         .route("/api/user/emotes/saved", get(get_saved_user_emotes_handler))
+        .route("/api/admin/users", get(list_users_handler))
         .with_state(state)
 }
 
@@ -336,6 +337,38 @@ async fn sync_user_emotes_handler(
                 tracing::error!("Failed to save synced user emotes to cache: {:?}", e);
             }
 
+            // Update Database
+            let user_display_name = if let Some(first_emote) = processed.first() {
+                first_emote.owner.clone().unwrap_or_else(|| "Unknown".to_string())
+            } else {
+                "Unknown".to_string()
+            };
+
+            let emote_count = processed.len() as i32;
+            
+            let query_result = sqlx::query(
+                r#"
+                INSERT INTO users (seven_tv_id, folder_name, display_name, last_synced_at, emote_count)
+                VALUES ($1, $2, $3, NOW(), $4)
+                ON CONFLICT (folder_name) 
+                DO UPDATE SET 
+                    seven_tv_id = EXCLUDED.seven_tv_id,
+                    display_name = EXCLUDED.display_name,
+                    last_synced_at = NOW(),
+                    emote_count = EXCLUDED.emote_count
+                "#
+            )
+            .bind(payload.user_id)
+            .bind(folder)
+            .bind(user_display_name)
+            .bind(emote_count)
+            .execute(&state.db)
+            .await;
+
+            if let Err(e) = query_result {
+                tracing::error!("Failed to update user record in DB: {:?}", e);
+            }
+
             Json(SearchResponse {
                 success: true,
                 total_found: processed.len() as i32,
@@ -413,4 +446,45 @@ async fn get_saved_user_emotes_handler(
         results_per_page: None,
         has_next_page: None,
     })
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+struct UserRecord {
+    id: i32,
+    seven_tv_id: String,
+    folder_name: String,
+    display_name: String,
+    last_synced_at: Option<chrono::DateTime<chrono::Utc>>,
+    emote_count: Option<i32>,
+}
+
+
+#[derive(Serialize)]
+struct UsersListResponse {
+    success: bool,
+    users: Vec<UserRecord>,
+}
+
+async fn list_users_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<UsersListResponse> {
+    let rows = sqlx::query_as::<_, UserRecord>(
+        "SELECT id, seven_tv_id, folder_name, display_name, last_synced_at, emote_count FROM users ORDER BY last_synced_at DESC"
+    )
+    .fetch_all(&state.db)
+    .await;
+
+    match rows {
+        Ok(users) => Json(UsersListResponse {
+            success: true,
+            users,
+        }),
+        Err(e) => {
+            tracing::error!("Failed to fetch users: {:?}", e);
+            Json(UsersListResponse {
+                success: false,
+                users: vec![],
+            })
+        }
+    }
 }

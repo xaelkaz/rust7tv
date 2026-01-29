@@ -16,6 +16,7 @@ pub struct Config {
     pub api_title: String,
     pub api_description: String,
     pub api_version: String,
+    pub database_url: String,
 }
 
 impl Config {
@@ -46,6 +47,7 @@ impl Config {
             api_description: env::var("API_DESCRIPTION")
                 .unwrap_or_else(|_| "API for fetching and storing 7TV emotes".to_string()),
             api_version: env::var("API_VERSION").unwrap_or_else(|_| "1.0.0".to_string()),
+            database_url: env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
         }
     }
 }
