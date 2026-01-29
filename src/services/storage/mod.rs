@@ -113,4 +113,16 @@ impl StorageService {
 
         Ok(())
     }
+
+    pub async fn get_blob_content(
+        &self,
+        blob_name: &str,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        let client = self.client.as_ref().ok_or("Azure Storage not initialized")?;
+        let container_client = client.container_client(&self.container_name);
+        let blob_client = container_client.blob_client(blob_name);
+
+        let data = blob_client.get_content().await?;
+        Ok(data)
+    }
 }

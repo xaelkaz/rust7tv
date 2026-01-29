@@ -217,6 +217,14 @@ async fn sync_trending_handler(
                 tracing::error!("Failed to save synced trending emotes to cache: {:?}", e);
             }
 
+            // Save metadata manifest to Azure
+            let metadata_blob_name = format!("{}/_metadata.json", folder);
+            if let Ok(json_data) = serde_json::to_vec(&processed) {
+                if let Err(e) = state.storage.upload_blob(json_data, &metadata_blob_name, "application/json").await {
+                    tracing::error!("Failed to save metadata to Azure: {:?}", e);
+                }
+            }
+
             Json(SearchResponse {
                 success: true,
                 total_found: processed.len() as i32,
@@ -260,30 +268,24 @@ async fn synced_trending_emotes_handler(
 
     let sync_key = crate::services::cache::CacheService::get_trending_sync_key(&period_str, animated_only);
 
+    // Try Redis first
     if let Some(cached_data) = state.cache.get_from_cache(&sync_key).await {
         if let Ok(all_emotes) = serde_json::from_slice::<Vec<EmoteResponse>>(&cached_data) {
-            let total = all_emotes.len();
-            let start_index = 0; 
-            let end_index = std::cmp::min(start_index + limit, total);
-            
-            let slice = if start_index < total {
-                all_emotes[start_index..end_index].to_vec()
-            } else {
-                vec![]
-            };
+            return return_paginated_response(all_emotes, limit);
+        }
+    }
 
-            return Json(SearchResponse {
-                success: true,
-                total_found: slice.len() as i32,
-                emotes: slice,
-                message: None,
-                cached: Some(true),
-                processing_time: None,
-                page: Some(1),
-                total_pages: Some(1),
-                results_per_page: Some(limit as i32),
-                has_next_page: Some(false),
-            });
+    // Try Azure Storage Fallback
+    let type_str = if animated_only { "animated" } else { "static" };
+    let folder = format!("trending/{}/{}", period_str, type_str);
+    let metadata_blob_name = format!("{}/_metadata.json", folder);
+
+    if let Ok(data) = state.storage.get_blob_content(&metadata_blob_name).await {
+        if let Ok(all_emotes) = serde_json::from_slice::<Vec<EmoteResponse>>(&data) {
+            // Restore to Redis
+             let _ = state.cache.save_to_cache(&sync_key, &all_emotes, 86400).await;
+             
+             return return_paginated_response(all_emotes, limit);
         }
     }
 
@@ -298,6 +300,31 @@ async fn synced_trending_emotes_handler(
         total_pages: None,
         results_per_page: None,
         has_next_page: None,
+    })
+}
+
+fn return_paginated_response(all_emotes: Vec<EmoteResponse>, limit: usize) -> Json<SearchResponse> {
+    let total = all_emotes.len();
+    let start_index = 0; 
+    let end_index = std::cmp::min(start_index + limit, total);
+    
+    let slice = if start_index < total {
+        all_emotes[start_index..end_index].to_vec()
+    } else {
+        vec![]
+    };
+
+    Json(SearchResponse {
+        success: true,
+        total_found: slice.len() as i32,
+        emotes: slice,
+        message: None,
+        cached: Some(true),
+        processing_time: None,
+        page: Some(1),
+        total_pages: Some(1),
+        results_per_page: Some(limit as i32),
+        has_next_page: Some(false),
     })
 }
 
