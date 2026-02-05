@@ -343,6 +343,7 @@
 
             const typeLabel = animated ? 'Animated' : 'Static';
             const endpoint = '/api/admin/sync-trending';
+            const startTime = Date.now();
 
             log(`Starting sync for <b>${period} (${typeLabel})</b> (Limit: ${SYNC_LIMIT})...`, 'loading');
 
@@ -358,14 +359,15 @@
                 });
 
                 const data = await response.json();
+                const duration = ((Date.now() - startTime) / 1000).toFixed(2);
 
                 if (response.ok && data.success) {
-                    log(`Sync Complete! Found ${data.totalFound} emotes.`, 'success');
+                    log(`✅ Sync Finished! Found ${data.totalFound} emotes. (Took ${duration}s)`, 'success');
                     // Refresh gallery if viewing the same category
                     const currentPeriod = document.getElementById('previewPeriod').value;
                     if (currentPeriod === period) loadPreview();
                 } else {
-                    log(`Sync Failed: ${data.message || 'Unknown error'}`, 'error');
+                    log(`❌ Sync Failed: ${data.message || 'Unknown error'}`, 'error');
                 }
             } catch (err) {
                 log(`Network Error: ${err.message}`, 'error');
@@ -383,6 +385,7 @@
             }
 
             const endpoint = '/api/admin/sync-user-emotes';
+            const startTime = Date.now();
             log(`Starting user sync for <b>${folderName}</b> (ID: ${userId})...`, 'loading');
 
             try {
@@ -397,11 +400,12 @@
                 });
 
                 const data = await response.json();
+                const duration = ((Date.now() - startTime) / 1000).toFixed(2);
 
                 if (response.ok && data.success) {
-                    log(`User Sync Complete! Found ${data.totalFound} emotes for folder: ${folderName}.`, 'success');
+                    log(`✅ User Sync Finished! Found ${data.totalFound} emotes for folder: ${folderName}. (Took ${duration}s)`, 'success');
                 } else {
-                    log(`User Sync Failed: ${data.message || 'Unknown error'}`, 'error');
+                    log(`❌ User Sync Failed: ${data.message || 'Unknown error'}`, 'error');
                 }
             } catch (err) {
                 log(`Network Error: ${err.message}`, 'error');
