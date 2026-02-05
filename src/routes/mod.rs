@@ -9,10 +9,13 @@ use crate::AppState;
 use crate::models::{TrendingPeriod, SearchResponse, SyncTrendingRequest, EmoteResponse};
 use serde::{Deserialize, Serialize};
 
+mod dashboard;
+
 pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(root_handler))
         .route("/health", get(health_handler))
+        .route("/admin/dashboard", get(dashboard::dashboard_handler))
         .route("/api/search-emotes", post(search_emotes_handler))
         .route("/api/trending/emotes", get(trending_emotes_handler))
         .route("/api/admin/sync-trending", post(sync_trending_handler))
@@ -225,6 +228,34 @@ async fn sync_trending_handler(
                 }
             }
 
+            // Save trending stickers to database with a special folder name
+            let db_folder = format!("trending_sync:{}:{}", period_str, animated_only);
+            
+            // First, clear existing stickers for this trending category in DB
+            let _ = sqlx::query("DELETE FROM stickers WHERE folder_name = $1")
+                .bind(&db_folder)
+                .execute(&state.db)
+                .await;
+
+            for emote in &processed {
+                let _ = sqlx::query(
+                    r#"
+                    INSERT INTO stickers (seven_tv_id, emote_name, file_name, url, owner_name, tags, animated, folder_name)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    "#
+                )
+                .bind(&emote.emote_id)
+                .bind(&emote.emote_name)
+                .bind(&emote.file_name)
+                .bind(&emote.url)
+                .bind(&emote.owner)
+                .bind(&emote.tags)
+                .bind(emote.animated.unwrap_or(false))
+                .bind(&db_folder)
+                .execute(&state.db)
+                .await;
+            }
+
             Json(SearchResponse {
                 success: true,
                 total_found: processed.len() as i32,
@@ -260,47 +291,71 @@ async fn synced_trending_emotes_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<TrendingQuery>,
 ) -> Json<SearchResponse> {
-    let limit = params.limit.unwrap_or(20) as usize;
-    // No page param support in synced endpoint for now, or just implicit page 1
-    
+    let limit = params.limit.unwrap_or(20) as i64;
     let animated_only = params.animated_only.unwrap_or(false) || params.emote_type.as_deref() == Some("animated");
     let period_str = params.period.unwrap_or_else(|| "trending_weekly".to_string());
 
-    let sync_key = crate::services::cache::CacheService::get_trending_sync_key(&period_str, animated_only);
+    let db_folder = format!("trending_sync:{}:{}", period_str, animated_only);
 
-    // Try Redis first
-    if let Some(cached_data) = state.cache.get_from_cache(&sync_key).await {
-        if let Ok(all_emotes) = serde_json::from_slice::<Vec<EmoteResponse>>(&cached_data) {
-            return return_paginated_response(all_emotes, limit);
+    // Query stickers from database
+    let rows = sqlx::query_as::<_, StickerRow>(
+        "SELECT seven_tv_id, emote_name, file_name, url, owner_name, tags, animated FROM stickers WHERE folder_name = $1 LIMIT $2"
+    )
+    .bind(&db_folder)
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await;
+
+    match rows {
+        Ok(stickers) if !stickers.is_empty() => {
+            let emotes: Vec<EmoteResponse> = stickers.into_iter().map(|s| EmoteResponse {
+                emote_id: s.seven_tv_id,
+                emote_name: s.emote_name,
+                file_name: s.file_name,
+                url: s.url,
+                owner: s.owner_name,
+                tags: s.tags,
+                animated: Some(s.animated),
+                scale: None,
+                mime: None,
+            }).collect();
+
+            Json(SearchResponse {
+                success: true,
+                total_found: emotes.len() as i32,
+                emotes,
+                message: None,
+                cached: Some(false),
+                processing_time: None,
+                page: Some(1),
+                total_pages: Some(1),
+                results_per_page: Some(limit as i32),
+                has_next_page: Some(false),
+            })
+        },
+        _ => {
+            // Fallback to Redis sync key logic if DB is empty
+            let sync_key = crate::services::cache::CacheService::get_trending_sync_key(&period_str, animated_only);
+            if let Some(cached_data) = state.cache.get_from_cache(&sync_key).await {
+                if let Ok(all_emotes) = serde_json::from_slice::<Vec<EmoteResponse>>(&cached_data) {
+                    return return_paginated_response(all_emotes, limit as usize);
+                }
+            }
+
+            Json(SearchResponse {
+                success: false,
+                total_found: 0,
+                emotes: vec![],
+                message: Some("No synced data found in DB or Cache. Please run admin sync.".to_string()),
+                cached: Some(false),
+                processing_time: None,
+                page: None,
+                total_pages: None,
+                results_per_page: None,
+                has_next_page: None,
+            })
         }
     }
-
-    // Try Azure Storage Fallback
-    let type_str = if animated_only { "animated" } else { "static" };
-    let folder = format!("trending/{}/{}", period_str, type_str);
-    let metadata_blob_name = format!("{}/_metadata.json", folder);
-
-    if let Ok(data) = state.storage.get_blob_content(&metadata_blob_name).await {
-        if let Ok(all_emotes) = serde_json::from_slice::<Vec<EmoteResponse>>(&data) {
-            // Restore to Redis
-             let _ = state.cache.save_to_cache(&sync_key, &all_emotes, 86400).await;
-             
-             return return_paginated_response(all_emotes, limit);
-        }
-    }
-
-    Json(SearchResponse {
-        success: false,
-        total_found: 0,
-        emotes: vec![],
-        message: Some("No synced data found. Please run admin sync.".to_string()),
-        cached: Some(false),
-        processing_time: None,
-        page: None,
-        total_pages: None,
-        results_per_page: None,
-        has_next_page: None,
-    })
 }
 
 fn return_paginated_response(all_emotes: Vec<EmoteResponse>, limit: usize) -> Json<SearchResponse> {
@@ -386,7 +441,7 @@ async fn sync_user_emotes_handler(
                 "#
             )
             .bind(payload.user_id)
-            .bind(folder)
+            .bind(&folder)
             .bind(user_display_name)
             .bind(emote_count)
             .execute(&state.db)
@@ -394,6 +449,34 @@ async fn sync_user_emotes_handler(
 
             if let Err(e) = query_result {
                 tracing::error!("Failed to update user record in DB: {:?}", e);
+            }
+
+            // Insert stickers into database
+            for emote in &processed {
+                let _ = sqlx::query(
+                    r#"
+                    INSERT INTO stickers (seven_tv_id, emote_name, file_name, url, owner_name, tags, animated, folder_name)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    ON CONFLICT (seven_tv_id, folder_name) 
+                    DO UPDATE SET 
+                        emote_name = EXCLUDED.emote_name,
+                        file_name = EXCLUDED.file_name,
+                        url = EXCLUDED.url,
+                        owner_name = EXCLUDED.owner_name,
+                        tags = EXCLUDED.tags,
+                        animated = EXCLUDED.animated
+                    "#
+                )
+                .bind(&emote.emote_id)
+                .bind(&emote.emote_name)
+                .bind(&emote.file_name)
+                .bind(&emote.url)
+                .bind(&emote.owner)
+                .bind(&emote.tags)
+                .bind(emote.animated.unwrap_or(false))
+                .bind(&folder)
+                .execute(&state.db)
+                .await;
             }
 
             Json(SearchResponse {
@@ -431,48 +514,85 @@ async fn get_saved_user_emotes_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<crate::models::SavedUserEmotesQuery>,
 ) -> Json<SearchResponse> {
-    let limit = params.limit.unwrap_or(100) as usize;
-    let cache_key = format!("user_emotes:{}", params.folder_name);
+    let limit = params.limit.unwrap_or(100) as i64;
+    
+    // Query stickers from database
+    let rows = sqlx::query_as::<_, StickerRow>(
+        "SELECT seven_tv_id, emote_name, file_name, url, owner_name, tags, animated FROM stickers WHERE folder_name = $1 LIMIT $2"
+    )
+    .bind(&params.folder_name)
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await;
 
-    if let Some(cached_data) = state.cache.get_from_cache(&cache_key).await {
-        if let Ok(all_emotes) = serde_json::from_slice::<Vec<EmoteResponse>>(&cached_data) {
-            let total = all_emotes.len();
-            let start_index = 0; 
-            let end_index = std::cmp::min(start_index + limit, total);
-            
-            let slice = if start_index < total {
-                all_emotes[start_index..end_index].to_vec()
-            } else {
-                vec![]
-            };
+    match rows {
+        Ok(stickers) if !stickers.is_empty() => {
+            let emotes: Vec<EmoteResponse> = stickers.into_iter().map(|s| EmoteResponse {
+                emote_id: s.seven_tv_id,
+                emote_name: s.emote_name,
+                file_name: s.file_name,
+                url: s.url,
+                owner: s.owner_name,
+                tags: s.tags,
+                animated: Some(s.animated),
+                scale: None, // We don't store scale in DB yet, but can be added if needed
+                mime: None, // Mime can be inferred or added to DB
+            }).collect();
 
-            return Json(SearchResponse {
+            Json(SearchResponse {
                 success: true,
-                total_found: slice.len() as i32,
-                emotes: slice,
+                total_found: emotes.len() as i32,
+                emotes,
                 message: None,
-                cached: Some(true),
+                cached: Some(false),
                 processing_time: None,
                 page: Some(1),
                 total_pages: Some(1),
                 results_per_page: Some(limit as i32),
                 has_next_page: Some(false),
-            });
+            })
+        },
+        Ok(_) => {
+            Json(SearchResponse {
+                success: false,
+                total_found: 0,
+                emotes: vec![],
+                message: Some("No saved emotes found for this folder name".to_string()),
+                cached: Some(false),
+                processing_time: None,
+                page: None,
+                total_pages: None,
+                results_per_page: None,
+                has_next_page: None,
+            })
+        },
+        Err(e) => {
+            tracing::error!("Failed to fetch stickers from DB: {:?}", e);
+            Json(SearchResponse {
+                success: false,
+                total_found: 0,
+                emotes: vec![],
+                message: Some(format!("Database error: {}", e)),
+                cached: Some(false),
+                processing_time: None,
+                page: None,
+                total_pages: None,
+                results_per_page: None,
+                has_next_page: None,
+            })
         }
     }
+}
 
-    Json(SearchResponse {
-        success: false,
-        total_found: 0,
-        emotes: vec![],
-        message: Some("No saved emotes found for this folder name".to_string()),
-        cached: Some(false),
-        processing_time: None,
-        page: None,
-        total_pages: None,
-        results_per_page: None,
-        has_next_page: None,
-    })
+#[derive(sqlx::FromRow)]
+struct StickerRow {
+    seven_tv_id: String,
+    emote_name: String,
+    file_name: String,
+    url: String,
+    owner_name: Option<String>,
+    tags: Option<Vec<String>>,
+    animated: bool,
 }
 
 #[derive(Serialize, sqlx::FromRow)]

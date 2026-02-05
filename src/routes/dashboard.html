@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gokeki Admin Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            background-color: #0f0f13;
+            color: #e2e8f0;
+            font-family: 'Inter', sans-serif;
+        }
+
+        .btn {
+            transition: all 0.2s;
+        }
+
+        .btn:active {
+            transform: scale(0.95);
+        }
+
+        .card {
+            background-color: #1e1e24;
+            border: 1px solid #2d2d35;
+        }
+
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #0f0f13;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #2d2d35;
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #4a4a55;
+        }
+    </style>
+</head>
+
+<body class="min-h-screen p-8">
+    <div class="max-w-7xl mx-auto space-y-8">
+
+        <!-- Header -->
+        <div class="flex justify-between items-center">
+            <div>
+                <h1
+                    class="text-3xl font-bold bg-gradient-to-r from-blue-400 to-purple-500 bg-clip-text text-transparent">
+                    Gokeki Admin</h1>
+                <p class="text-gray-400 mt-1">Sticker Synchronization & Management</p>
+            </div>
+            <div class="flex gap-2">
+                <span
+                    class="px-3 py-1 rounded-full bg-green-500/10 text-green-400 text-sm border border-green-500/20">System
+                    Online</span>
+            </div>
+        </div>
+
+        <!-- Tabs Navigation -->
+        <div class="flex gap-4 border-b border-gray-800">
+            <button onclick="switchTab('trending')" id="btn-trending"
+                class="pb-2 text-sm font-medium border-b-2 border-blue-500 text-blue-400 transition-colors">
+                Trending Sync
+            </button>
+            <button onclick="switchTab('users')" id="btn-users"
+                class="pb-2 text-sm font-medium border-b-2 border-transparent text-gray-400 hover:text-gray-300 transition-colors">
+                User Sync
+            </button>
+        </div>
+
+        <!-- Sync Content Area -->
+        <div class="h-64 relative"> <!-- Fixed height container to prevent layout jumps -->
+
+            <!-- CONTENIDO TAB 1: Trending Sync -->
+            <div id="tab-trending" class="absolute inset-0 transition-opacity duration-300 opacity-100 z-10">
+                <div class="card rounded-xl p-6 shadow-xl h-full">
+                    <h2 class="text-xl font-semibold mb-4 flex items-center gap-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
+                            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                            class="text-blue-400">
+                            <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                            <path d="M3 3v5h5" />
+                            <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+                            <path d="M16 21h5v-5" />
+                        </svg>
+                        Trending Sync Controls
+                    </h2>
+
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                        <!-- Trending Daily -->
+                        <div class="space-y-3">
+                            <h3 class="text-xs font-medium text-gray-400 uppercase tracking-wider">Trending Daily</h3>
+                            <div class="flex gap-2">
+                                <button onclick="triggerSync('trending_daily', true)"
+                                    class="btn bg-blue-600 hover:bg-blue-500 text-white px-3 py-2 rounded-lg text-sm w-full flex items-center justify-center gap-2">
+                                    <span>Animated</span>
+                                </button>
+                                <button onclick="triggerSync('trending_daily', false)"
+                                    class="btn bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded-lg text-sm w-full">
+                                    Static
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Trending Weekly -->
+                        <div class="space-y-3">
+                            <h3 class="text-xs font-medium text-gray-400 uppercase tracking-wider">Trending Weekly</h3>
+                            <div class="flex gap-2">
+                                <button onclick="triggerSync('trending_weekly', true)"
+                                    class="btn bg-purple-600 hover:bg-purple-500 text-white px-3 py-2 rounded-lg text-sm w-full">
+                                    Animated
+                                </button>
+                                <button onclick="triggerSync('trending_weekly', false)"
+                                    class="btn bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded-lg text-sm w-full">
+                                    Static
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Trending Monthly -->
+                        <div class="space-y-3">
+                            <h3 class="text-xs font-medium text-gray-400 uppercase tracking-wider">Trending Monthly</h3>
+                            <div class="flex gap-2">
+                                <button onclick="triggerSync('trending_monthly', true)"
+                                    class="btn bg-pink-600 hover:bg-pink-500 text-white px-3 py-2 rounded-lg text-sm w-full">
+                                    Animated
+                                </button>
+                                <button onclick="triggerSync('trending_monthly', false)"
+                                    class="btn bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded-lg text-sm w-full">
+                                    Static
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- CONTENIDO TAB 2: User Sync -->
+            <div id="tab-users"
+                class="absolute inset-0 transition-opacity duration-300 opacity-0 pointer-events-none z-0">
+                <div class="card rounded-xl p-6 shadow-xl h-full flex flex-col justify-center">
+                    <h2 class="text-xl font-semibold mb-4 flex items-center gap-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
+                            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                            class="text-purple-400">
+                            <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                            <circle cx="8.5" cy="7" r="4" />
+                            <line x1="20" y1="8" x2="20" y2="14" />
+                            <line x1="23" y1="11" x2="17" y2="11" />
+                        </svg>
+                        User Sync Controls
+                    </h2>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+                        <div>
+                            <label class="block text-xs font-medium text-gray-400 mb-1">7TV User ID</label>
+                            <input type="text" id="userIdInput" placeholder="e.g. 01GDZT..."
+                                class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500 transition-colors">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-400 mb-1">Folder Name</label>
+                            <input type="text" id="folderNameInput" placeholder="e.g. BaityBait"
+                                class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500 transition-colors">
+                        </div>
+                        <button onclick="triggerUserSync()"
+                            class="btn bg-purple-600 hover:bg-purple-500 text-white px-4 py-2 rounded-lg text-sm h-[38px] flex items-center justify-center gap-2">
+                            Sync User
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- Console / Status -->
+        <div class="card rounded-xl p-6 shadow-xl">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl font-semibold flex items-center gap-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
+                        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                        class="text-green-400">
+                        <polyline points="4 17 10 11 4 5" />
+                        <line x1="12" y1="19" x2="20" y2="19" />
+                    </svg>
+                    Operation Logs
+                </h2>
+                <button onclick="clearLogs()" class="text-xs text-gray-500 hover:text-white">Clear</button>
+            </div>
+            <div id="logs"
+                class="bg-[#0a0a0c] rounded-lg p-4 h-48 overflow-y-auto font-mono text-xs space-y-1 border border-gray-800">
+                <div class="text-gray-500">System ready...</div>
+            </div>
+        </div>
+
+        <!-- Preview Gallery -->
+        <div class="card rounded-xl p-6 shadow-xl">
+            <div class="flex justify-between items-center mb-6">
+                <h2 class="text-xl font-semibold flex items-center gap-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
+                        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                        class="text-orange-400">
+                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                        <circle cx="8.5" cy="8.5" r="1.5" />
+                        <polyline points="21 15 16 10 5 21" />
+                    </svg>
+                    Database Preview
+                </h2>
+                <div class="flex gap-2">
+                    <select id="previewPeriod" class="bg-gray-800 border-gray-700 text-sm rounded-lg p-2 text-white">
+                        <option value="trending_daily">Daily</option>
+                        <option value="trending_weekly" selected>Weekly</option>
+                        <option value="trending_monthly">Monthly</option>
+                    </select>
+                    <button onclick="loadPreview()"
+                        class="btn bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 rounded-lg text-sm">
+                        Refresh
+                    </button>
+                </div>
+            </div>
+
+            <div id="gallery" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
+                <!-- Images will be loaded here -->
+            </div>
+        </div>
+
+        <!-- Confirmation Modal -->
+        <div id="confirmModal"
+            class="hidden fixed inset-0 bg-black/80 flex items-center justify-center z-50 backdrop-blur-sm">
+            <div
+                class="card bg-[#1e1e24] p-8 rounded-2xl shadow-2xl max-w-md w-full border border-gray-700 transform transition-all scale-100">
+                <h3 class="text-2xl font-bold text-white mb-2">Confirm Synchronization</h3>
+                <p class="text-gray-400 mb-6">
+                    Are you sure you want to sync <b><span id="modalTarget" class="text-blue-400"></span></b>?
+                    <br><br>
+                    This will fetch <span id="modalLimit" class="text-white font-bold"></span> emotes.
+                </p>
+
+                <div class="flex gap-4 justify-end">
+                    <button onclick="closeModal()"
+                        class="px-5 py-2 rounded-lg text-gray-300 hover:text-white hover:bg-gray-700 transition-colors font-medium">
+                        Cancel
+                    </button>
+                    <button onclick="executeSync()"
+                        class="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-600/20 transition-all transform hover:scale-105 font-medium">
+                        Start Sync
+                    </button>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        const SYNC_LIMIT = 250;
+        let pendingSync = null;
+
+        // Tab Switching Logic
+        function switchTab(tabName) {
+            // Update Buttons
+            const btnTrending = document.getElementById('btn-trending');
+            const btnUsers = document.getElementById('btn-users');
+
+            // Remove active classes
+            [btnTrending, btnUsers].forEach(btn => {
+                btn.classList.remove('border-blue-500', 'text-blue-400');
+                btn.classList.add('border-transparent', 'text-gray-400');
+            });
+
+            // Add active class to clicked
+            const activeBtn = tabName === 'trending' ? btnTrending : btnUsers;
+            activeBtn.classList.remove('border-transparent', 'text-gray-400');
+            activeBtn.classList.add('border-blue-500', 'text-blue-400');
+
+            // Toggle Content Visibility
+            const tabTrending = document.getElementById('tab-trending');
+            const tabUsers = document.getElementById('tab-users');
+
+            if (tabName === 'trending') {
+                tabTrending.classList.remove('opacity-0', 'pointer-events-none');
+                tabTrending.classList.add('opacity-100', 'z-10');
+
+                tabUsers.classList.remove('opacity-100', 'z-10');
+                tabUsers.classList.add('opacity-0', 'pointer-events-none');
+            } else {
+                tabUsers.classList.remove('opacity-0', 'pointer-events-none');
+                tabUsers.classList.add('opacity-100', 'z-10');
+
+                tabTrending.classList.remove('opacity-100', 'z-10');
+                tabTrending.classList.add('opacity-0', 'pointer-events-none');
+            }
+        }
+
+        // Logger function
+        function log(message, type = 'info') {
+            const logs = document.getElementById('logs');
+            const entry = document.createElement('div');
+            const time = new Date().toLocaleTimeString();
+
+            let color = 'text-gray-300';
+            if (type === 'error') color = 'text-red-400';
+            if (type === 'success') color = 'text-green-400';
+            if (type === 'loading') color = 'text-blue-400';
+
+            entry.className = `${color} border-l-2 pl-2 border-opacity-20 ${type === 'error' ? 'border-red-500' : 'border-gray-500'}`;
+            entry.innerHTML = `<span class="text-gray-600 mr-2">[${time}]</span> ${message}`;
+
+            logs.prepend(entry);
+        }
+
+        function clearLogs() {
+            document.getElementById('logs').innerHTML = '';
+        }
+
+        // Action: Open Confirmation Modal
+        function triggerSync(period, animated) {
+            const typeLabel = animated ? 'Animated' : 'Static';
+            const prettyPeriod = period.replace('trending_', '').charAt(0).toUpperCase() + period.replace('trending_', '').slice(1);
+
+            document.getElementById('modalTarget').innerText = `${prettyPeriod} (${typeLabel})`;
+            document.getElementById('modalLimit').innerText = SYNC_LIMIT;
+            document.getElementById('confirmModal').classList.remove('hidden');
+
+            pendingSync = { period, animated };
+        }
+
+        function closeModal() {
+            document.getElementById('confirmModal').classList.add('hidden');
+            pendingSync = null;
+        }
+
+        // Action: Execute Sync
+        async function executeSync() {
+            if (!pendingSync) return;
+
+            const { period, animated } = pendingSync;
+            closeModal();
+
+            const typeLabel = animated ? 'Animated' : 'Static';
+            const endpoint = '/api/admin/sync-trending';
+
+            log(`Starting sync for <b>${period} (${typeLabel})</b> (Limit: ${SYNC_LIMIT})...`, 'loading');
+
+            try {
+                const response = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        period: period,
+                        animated_only: animated,
+                        limit: SYNC_LIMIT
+                    })
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    log(`Sync Complete! Found ${data.totalFound} emotes.`, 'success');
+                    // Refresh gallery if viewing the same category
+                    const currentPeriod = document.getElementById('previewPeriod').value;
+                    if (currentPeriod === period) loadPreview();
+                } else {
+                    log(`Sync Failed: ${data.message || 'Unknown error'}`, 'error');
+                }
+            } catch (err) {
+                log(`Network Error: ${err.message}`, 'error');
+            }
+        }
+
+        // Action: Trigger User Sync
+        async function triggerUserSync() {
+            const userId = document.getElementById('userIdInput').value.trim();
+            const folderName = document.getElementById('folderNameInput').value.trim();
+
+            if (!userId || !folderName) {
+                log('Please provide both User ID and Folder Name', 'error');
+                return;
+            }
+
+            const endpoint = '/api/admin/sync-user-emotes';
+            log(`Starting user sync for <b>${folderName}</b> (ID: ${userId})...`, 'loading');
+
+            try {
+                const response = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        userId: userId,
+                        folderName: folderName,
+                        limit: SYNC_LIMIT
+                    })
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    log(`User Sync Complete! Found ${data.totalFound} emotes for folder: ${folderName}.`, 'success');
+                } else {
+                    log(`User Sync Failed: ${data.message || 'Unknown error'}`, 'error');
+                }
+            } catch (err) {
+                log(`Network Error: ${err.message}`, 'error');
+            }
+        }
+
+        // Action: Load Preview
+        async function loadPreview() {
+            const period = document.getElementById('previewPeriod').value;
+            const gallery = document.getElementById('gallery');
+
+            gallery.innerHTML = '<div class="col-span-full text-center text-gray-500 py-8">Loading stickers...</div>';
+
+            try {
+                // Fetch animated first as they are usually what we want to see
+                const response = await fetch(`/api/trending/synced?period=${period}&limit=24&animated_only=true`);
+                const data = await response.json();
+
+                if (data.success && data.emotes.length > 0) {
+                    gallery.innerHTML = data.emotes.map(emote => `
+                        <div class="card rounded-lg p-2 flex flex-col items-center gap-2 group hover:border-blue-500 transition-colors cursor-pointer relative" title="${emote.emoteName}">
+                            <div class="h-24 w-full flex items-center justify-center bg-gray-900/50 rounded overflow-hidden">
+                                <img src="${emote.url}" alt="${emote.emoteName}" class="max-h-full max-w-full object-contain group-hover:scale-110 transition-transform">
+                            </div>
+                            <div class="text-xs text-gray-400 truncate w-full text-center font-medium">${emote.emoteName}</div>
+                            
+                            <!-- Hover Overlay for details -->
+                            <div class="absolute inset-0 bg-black/80 opacity-0 group-hover:opacity-100 transition-opacity rounded-lg flex flex-col items-center justify-center p-2 text-xs">
+                                <span class="text-white font-bold mb-1">${emote.emoteName}</span>
+                                <span class="text-gray-400">${emote.owner || 'Unknown'}</span>
+                                <span class="mt-2 px-2 py-0.5 bg-blue-600 rounded text-[10px] text-white">ID: ${emote.emoteId.substring(0, 4)}...</span>
+                            </div>
+                        </div>
+                    `).join('');
+                } else {
+                    gallery.innerHTML = '<div class="col-span-full text-center text-gray-500 py-8">No stickers found in database. Try syncing first.</div>';
+                }
+            } catch (err) {
+                gallery.innerHTML = `<div class="col-span-full text-center text-red-400 py-8">Failed to load preview: ${err.message}</div>`;
+            }
+        }
+
+        // Init
+        document.addEventListener('DOMContentLoaded', () => {
+            loadPreview();
+        });
+    </script>
+</body>
+
+</html>
