@@ -9,10 +9,13 @@ use crate::AppState;
 use crate::models::{TrendingPeriod, SearchResponse, SyncTrendingRequest, EmoteResponse};
 use serde::{Deserialize, Serialize};
 
+mod dashboard;
+
 pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(root_handler))
         .route("/health", get(health_handler))
+        .route("/admin/dashboard", get(dashboard::dashboard_handler))
         .route("/api/search-emotes", post(search_emotes_handler))
         .route("/api/trending/emotes", get(trending_emotes_handler))
         .route("/api/admin/sync-trending", post(sync_trending_handler))
