@@ -15,6 +15,7 @@ pub struct Emote {
     pub images: Option<Vec<Image>>,
     pub host: Option<TrendingHost>,
     pub animated: Option<bool>,
+    pub tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -116,6 +117,7 @@ impl SevenTVService {
                   width
                   frameCount
                 }
+                tags
                 ranking(ranking: TRENDING_WEEKLY)
                 inEmoteSets(emoteSetIds: [$defaultSetId]) @include(if: $isDefaultSetSet) {
                   emoteSetId
@@ -159,9 +161,13 @@ impl SevenTVService {
         }
 
         let body_text = resp.text().await?;
-        // tracing::debug!("7TV Search API Response Body: {}", body_text);
-
         let body: serde_json::Value = serde_json::from_str(&body_text)?;
+        
+        if let Some(errors) = body.get("errors") {
+            tracing::error!("7TV Search API GraphQL Errors: {:?}", errors);
+            return Err(format!("7TV GraphQL Error: {}", errors).into());
+        }
+
         let items = body["data"]["emotes"]["search"]["items"]
             .as_array()
             .ok_or("Invalid response format: missing data.emotes.search.items")?;
@@ -198,6 +204,7 @@ impl SevenTVService {
                                 platformDisplayName
                             }
                         }
+                        tags
                     }
                 }
             }
@@ -233,9 +240,13 @@ impl SevenTVService {
         }
 
         let body_text = resp.text().await?;
-        // tracing::debug!("7TV API Response Body: {}", body_text);
-
         let body: serde_json::Value = serde_json::from_str(&body_text)?;
+
+        if let Some(errors) = body.get("errors") {
+            tracing::error!("7TV Trending API GraphQL Errors: {:?}", errors);
+            return Err(format!("7TV GraphQL Error: {}", errors).into());
+        }
+
         let items = body["data"]["emotes"]["search"]["items"]
             .as_array()
             .ok_or("Invalid response format: missing data.emotes.search.items")?;
@@ -251,68 +262,7 @@ impl SevenTVService {
     ) -> Result<Vec<Emote>, Box<dyn std::error::Error + Send + Sync>> {
         tracing::info!("Fetching user emotes: user_id={}, limit={}", user_id, limit);
 
-        let gql = r#"
-        query SearchEmotesInActiveSet($userId: Id!, $query: String, $page: Int!, $isDefaultSetSet: Boolean!, $defaultSetId: Id!, $perPage: Int!) {
-          users {
-            user(id: $userId) {
-              style {
-                activeEmoteSet {
-                  id
-                  emotes(query: $query, page: $page, perPage: $perPage) {
-                    items {
-                      id
-                      defaultName
-                      owner {
-                        mainConnection {
-                          platformDisplayName
-                        }
-                      }
-                      images {
-                        url
-                        mime
-                        size
-                        scale
-                        width
-                        frameCount
-                      }
-                      animated: flags {
-                        animated: zeroWidth 
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-        "#;
 
-        // Note: The original GraphQL query had "animated" inside flags? No, the user provided query uses "flags { zeroWidth }" but standard emote structure has "animated". 
-        // Actually, looking at the user payload, `animated` isn't directly on `items` -> `emote`. 
-        // Wait, the user provided query returns `items { emote { ... } }`, but my `Emote` struct is flat.
-        // The `SearchEmotesInActiveSet` query structure returning `items { emote { ... } }` is different from `fetch_trending_emotes` which returns `items { ... }` directly?
-        // Let's re-examine the user provided query carefully.
-        // It returns `items { emote { id ... } }`.
-        // However, my `Emote` struct expects fields at the top level.
-        // I should probably adjust the query aliases or post-process the JSON to match `Emote` struct, OR adapt `Emote` struct (but it's shared).
-        // Let's look at `fetch_trending_emotes` results. It returns a list of emotes.
-        // User query: `items` is a list of objects containing `emote`.
-        // I will write a custom struct for this response internally or just decode to Value and map. 
-        // Mapping is safer.
-        //
-        // Re-writing the query to be simpler and closer to what we need if possible, OR just use the user provided one and parse manually.
-        // User provided one:
-        /*
-        items {
-              emote {
-                id
-                defaultName
-                owner { ... }
-                images { ... }
-              }
-        }
-        */
-        
         let gql = r#"
         query SearchEmotesInActiveSet($userId: Id!, $perPage: Int!) {
           users {
@@ -337,6 +287,7 @@ impl SevenTVService {
                             width
                             frameCount
                         }
+                        tags
                       }
                     }
                   }
@@ -366,6 +317,12 @@ impl SevenTVService {
 
         let body_text = resp.text().await?;
         let body: serde_json::Value = serde_json::from_str(&body_text)?;
+        
+        if let Some(errors) = body.get("errors") {
+            tracing::error!("7TV User Emotes API GraphQL Errors: {:?}", errors);
+            return Err(format!("7TV GraphQL Error: {}", errors).into());
+        }
+
         
         // Traverse path: data.users.user.style.activeEmoteSet.emotes.items
         let items_wrapper = body["data"]["users"]["user"]["style"]["activeEmoteSet"]["emotes"]["items"]
@@ -470,6 +427,7 @@ async fn process_single_emote(
         animated: Some(best_image.frame_count > 1),
         scale: Some(best_image.scale),
         mime: Some(best_image.mime.clone()),
+        tags: e.tags.clone(),
     })
 }
 
