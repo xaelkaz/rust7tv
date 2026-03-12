@@ -59,7 +59,7 @@ async fn search_emotes_handler(
     let result = state.seventv.search_emotes(&payload.query, page, limit, animated_only).await;
     match result {
         Ok(emotes) => {
-            let processed = state.seventv.process_emotes_batch(emotes, "emotes").await;
+            let processed = state.seventv.process_emotes_batch_no_storage(emotes);
             let response = SearchResponse {
                 success: true,
                 total_found: processed.len() as i32,

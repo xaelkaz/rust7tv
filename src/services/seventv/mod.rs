@@ -360,6 +360,67 @@ impl SevenTVService {
             .collect()
             .await
     }
+
+    pub fn process_emotes_batch_no_storage(&self, emotes: Vec<Emote>) -> Vec<EmoteResponse> {
+        emotes.into_iter()
+            .filter_map(|e| {
+                let images = if let Some(imgs) = &e.images {
+                    imgs.clone()
+                } else if let Some(host) = &e.host {
+                    let animated = e.animated.unwrap_or(false);
+                    host.files.iter().map(|f| {
+                        let scale_str = f.name.trim_end_matches(&format!("x.{}", f.format)); // simplistic parsing
+                        let scale = scale_str.parse().unwrap_or(1);
+                        let mime = format!("image/{}", f.format);
+                        let url = format!("https:{}/{}", host.url, f.name);
+                        Image {
+                            url,
+                            mime,
+                            size: 0,
+                            scale,
+                            width: f.width,
+                            frame_count: if animated { 2 } else { 1 },
+                        }
+                    }).collect()
+                } else {
+                    return None;
+                };
+
+                let best_image = select_best_image(&images)?;
+
+                let extension = match best_image.mime.as_str() {
+                    "image/webp" => ".webp",
+                    "image/gif" => ".gif",
+                    "image/avif" => ".avif",
+                    _ => ".png",
+                };
+
+                let name = e.default_name.as_deref().or(e.name.as_deref())?;
+                let safe_name: String = name.chars()
+                    .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' || c == ' ' { c } else { '_' })
+                    .collect();
+                
+                let file_name = format!("{}_{}{}", safe_name, e.id, extension);
+                
+                let mut url = best_image.url.clone();
+                if url.starts_with("//") {
+                    url = format!("https:{}", url);
+                }
+
+                Some(EmoteResponse {
+                    file_name,
+                    url,
+                    emote_id: e.id,
+                    emote_name: name.to_string(),
+                    owner: e.owner.and_then(|o| o.main_connection.map(|c| c.platform_display_name)),
+                    animated: Some(best_image.frame_count > 1),
+                    scale: Some(best_image.scale),
+                    mime: Some(best_image.mime.clone()),
+                    tags: e.tags.clone(),
+                })
+            })
+            .collect()
+    }
 }
 
 async fn process_single_emote(
