@@ -42,6 +42,19 @@ pub struct SearchResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrendingTagResponse {
+    pub success: bool,
+    pub tags: Vec<TrendingTag>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TrendingTag {
+    pub tag: String,
+    pub count: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SearchRequest {
     pub query: String,
     #[serde(alias = "perPage")]

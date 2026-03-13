@@ -6,7 +6,7 @@ use axum::{
 };
 use std::sync::Arc;
 use crate::AppState;
-use crate::models::{TrendingPeriod, SearchResponse, SyncTrendingRequest, EmoteResponse};
+use crate::models::{TrendingPeriod, SearchResponse, SyncTrendingRequest, EmoteResponse, TrendingTagResponse, TrendingTag};
 use serde::{Deserialize, Serialize};
 
 mod dashboard;
@@ -17,6 +17,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/health", get(health_handler))
         .route("/admin/dashboard", get(dashboard::dashboard_handler))
         .route("/api/search-emotes", post(search_emotes_handler))
+        .route("/api/trending/tags", get(trending_tags_handler))
         .route("/api/trending/emotes", get(trending_emotes_handler))
         .route("/api/admin/sync-trending", post(sync_trending_handler))
         .route("/api/trending/synced", get(synced_trending_emotes_handler))
@@ -188,24 +189,8 @@ async fn sync_trending_handler(
     let type_str = if animated_only { "animated" } else { "static" };
     let folder = format!("trending/{}/{}", period_str, type_str);
 
-    // 1. Cleanup existing blobs in that folder
-    if let Err(e) = state.storage.delete_blobs_by_prefix(&format!("{}/", folder)).await {
-        tracing::error!("Failed to cleanup Azure folder {}: {:?}", folder, e);
-        // We continue anyway, or maybe return error? 
-        // Let's return error to be safe as per user request of "not mixing"
-        return Json(SearchResponse {
-            success: false,
-            total_found: 0,
-            emotes: vec![],
-            message: Some(format!("Failed to cleanup existing emotes: {}", e)),
-            cached: Some(false),
-            processing_time: None,
-            page: None,
-            total_pages: None,
-            results_per_page: None,
-            has_next_page: None,
-        });
-    }
+    // Removed: We no longer cleanup existing blobs in that folder to prevent breaking user favorites. 
+    // The database DELETE handles logical trending cleanup.
 
     match state.seventv.fetch_trending_emotes(&period, limit, animated_only).await {
         Ok(emotes) => {
@@ -282,6 +267,57 @@ async fn sync_trending_handler(
                 total_pages: None,
                 results_per_page: None,
                 has_next_page: None,
+            })
+        }
+    }
+}
+
+async fn trending_tags_handler(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<TrendingQuery>,
+) -> Json<TrendingTagResponse> {
+    let limit = params.limit.unwrap_or(10) as i64;
+    let animated_only = params.animated_only.unwrap_or(false) || params.emote_type.as_deref() == Some("animated");
+    let period_str = params.period.unwrap_or_else(|| "trending_weekly".to_string());
+
+    let db_folder = format!("trending_sync:{}:{}", period_str, animated_only);
+
+    // Unnest tags array, group by tag name, count occurrences, and return top N
+    let query = r#"
+        SELECT tag, count(*) as frequency 
+        FROM (
+            SELECT unnest(tags) as tag
+            FROM stickers 
+            WHERE folder_name = $1
+        ) sub
+        GROUP BY tag 
+        ORDER BY frequency DESC 
+        LIMIT $2
+    "#;
+
+    let rows = sqlx::query_as::<_, (String, i64)>(query)
+        .bind(&db_folder)
+        .bind(limit)
+        .fetch_all(&state.db)
+        .await;
+
+    match rows {
+        Ok(results) => {
+            let tags = results.into_iter().map(|(tag, count)| TrendingTag {
+                tag,
+                count,
+            }).collect();
+
+            Json(TrendingTagResponse {
+                success: true,
+                tags,
+            })
+        },
+        Err(e) => {
+            tracing::error!("Failed to fetch trending tags from DB: {:?}", e);
+            Json(TrendingTagResponse {
+                success: false,
+                tags: vec![],
             })
         }
     }
@@ -390,22 +426,8 @@ async fn sync_user_emotes_handler(
     let limit = payload.limit.unwrap_or(100);
     let folder = payload.folder_name;
 
-    // 1. Cleanup existing blobs in that folder
-    if let Err(e) = state.storage.delete_blobs_by_prefix(&format!("{}/", folder)).await {
-        tracing::error!("Failed to cleanup Azure folder {}: {:?}", folder, e);
-        return Json(SearchResponse {
-            success: false,
-            total_found: 0,
-            emotes: vec![],
-            message: Some(format!("Failed to cleanup existing emotes: {}", e)),
-            cached: Some(false),
-            processing_time: None,
-            page: None,
-            total_pages: None,
-            results_per_page: None,
-            has_next_page: None,
-        });
-    }
+    // Removed: We no longer cleanup existing blobs in that user folder to prevent breaking user favorites. 
+    // The ON CONFLICT DO UPDATE handles database logical cleanup and override.
 
     match state.seventv.fetch_user_emotes(&payload.user_id, limit).await {
         Ok(emotes) => {
