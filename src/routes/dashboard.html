@@ -76,10 +76,10 @@
         </div>
 
         <!-- Sync Content Area -->
-        <div class="min-h-64 relative"> <!-- Min height container; grows with content (e.g. user list) -->
+        <div> <!-- Tabs grow with content; inactive tab is hidden via .hidden -->
 
             <!-- CONTENIDO TAB 1: Trending Sync -->
-            <div id="tab-trending" class="absolute inset-0 transition-opacity duration-300 opacity-100 z-10">
+            <div id="tab-trending">
                 <div class="card rounded-xl p-6 shadow-xl h-full">
                     <h2 class="text-xl font-semibold mb-4 flex items-center gap-2">
                         <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
@@ -143,8 +143,7 @@
             </div>
 
             <!-- CONTENIDO TAB 2: User Sync -->
-            <div id="tab-users"
-                class="absolute inset-0 transition-opacity duration-300 opacity-0 pointer-events-none z-0">
+            <div id="tab-users" class="hidden">
                 <div class="card rounded-xl p-6 shadow-xl h-full flex flex-col">
                     <div class="flex justify-between items-center mb-4">
                         <h2 class="text-xl font-semibold flex items-center gap-2">
@@ -324,17 +323,11 @@
             const tabUsers = document.getElementById('tab-users');
 
             if (tabName === 'trending') {
-                tabTrending.classList.remove('opacity-0', 'pointer-events-none');
-                tabTrending.classList.add('opacity-100', 'z-10');
-
-                tabUsers.classList.remove('opacity-100', 'z-10');
-                tabUsers.classList.add('opacity-0', 'pointer-events-none');
+                tabTrending.classList.remove('hidden');
+                tabUsers.classList.add('hidden');
             } else {
-                tabUsers.classList.remove('opacity-0', 'pointer-events-none');
-                tabUsers.classList.add('opacity-100', 'z-10');
-
-                tabTrending.classList.remove('opacity-100', 'z-10');
-                tabTrending.classList.add('opacity-0', 'pointer-events-none');
+                tabUsers.classList.remove('hidden');
+                tabTrending.classList.add('hidden');
             }
         }
 
