@@ -17,6 +17,9 @@ pub struct Config {
     pub api_description: String,
     pub api_version: String,
     pub database_url: String,
+    pub admin_token: String,
+    pub admin_user: String,
+    pub admin_password: String,
 }
 
 impl Config {
@@ -48,6 +51,12 @@ impl Config {
                 .unwrap_or_else(|_| "API for fetching and storing 7TV emotes".to_string()),
             api_version: env::var("API_VERSION").unwrap_or_else(|_| "1.0.0".to_string()),
             database_url: env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
+            admin_token: env::var("ADMIN_TOKEN")
+                .expect("ADMIN_TOKEN must be set (required to protect /api/admin/* endpoints)"),
+            admin_user: env::var("ADMIN_USER")
+                .expect("ADMIN_USER must be set (required for /admin/dashboard basic auth)"),
+            admin_password: env::var("ADMIN_PASSWORD")
+                .expect("ADMIN_PASSWORD must be set (required for /admin/dashboard basic auth)"),
         }
     }
 }
