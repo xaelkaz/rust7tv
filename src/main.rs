@@ -20,7 +20,7 @@ async fn main() {
     
     // Database connection
     let pool = PgPoolOptions::new()
-        .max_connections(5)
+        .max_connections(20)
         .connect(&cfg.database_url)
         .await
         .expect("Failed to connect to Postgres");

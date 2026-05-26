@@ -103,23 +103,41 @@ impl StorageService {
         &self,
         prefix: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use futures::stream::{self, StreamExt};
+
         let client = self.client.as_ref().ok_or("Azure Storage not initialized")?;
         let container_client = client.container_client(&self.container_name);
 
-        let mut stream = container_client
+        // Walk paginated list response and collect every blob name.
+        let mut names: Vec<String> = Vec::new();
+        let mut pages = container_client
             .list_blobs()
             .prefix(prefix.to_string())
             .into_stream();
+        while let Some(page) = pages.next().await {
+            let page = page?;
+            for blob in page.blobs.blobs() {
+                names.push(blob.name.clone());
+            }
+        }
 
-        while let Some(value) = futures::StreamExt::next(&mut stream).await {
-            let resp = value?;
-            for blob in resp.blobs.blobs() {
-                container_client
-                    .blob_client(blob.name.clone())
-                    .delete()
-                    .into_future()
-                    .await?;
-                tracing::info!("Deleted blob: {}", blob.name);
+        // Fan out deletes with bounded concurrency. Fail-fast on first error;
+        // in-flight deletes that already hit Azure will still complete.
+        const PARALLEL: usize = 16;
+        let mut results = stream::iter(names)
+            .map(|name| {
+                let cc = container_client.clone();
+                async move {
+                    let res = cc.blob_client(&name).delete().into_future().await;
+                    (name, res)
+                }
+            })
+            .buffer_unordered(PARALLEL);
+
+        while let Some((name, res)) = results.next().await {
+            match res {
+                Ok(_) => tracing::info!("Deleted blob: {}", name),
+                Err(e) => return Err(Box::new(e)),
             }
         }
 

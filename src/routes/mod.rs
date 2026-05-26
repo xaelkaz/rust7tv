@@ -71,23 +71,21 @@ async fn persist_trending_stickers(
         .execute(&mut *tx)
         .await?;
 
-    for emote in emotes {
-        sqlx::query(
-            r#"
-            INSERT INTO stickers (seven_tv_id, emote_name, file_name, url, owner_name, tags, animated, folder_name)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            "#,
-        )
-        .bind(&emote.emote_id)
-        .bind(&emote.emote_name)
-        .bind(&emote.file_name)
-        .bind(&emote.url)
-        .bind(&emote.owner)
-        .bind(&emote.tags)
-        .bind(emote.animated.unwrap_or(false))
-        .bind(db_folder)
-        .execute(&mut *tx)
-        .await?;
+    if !emotes.is_empty() {
+        let mut qb = sqlx::QueryBuilder::new(
+            "INSERT INTO stickers (seven_tv_id, emote_name, file_name, url, owner_name, tags, animated, folder_name) ",
+        );
+        qb.push_values(emotes, |mut b, emote| {
+            b.push_bind(&emote.emote_id)
+                .push_bind(&emote.emote_name)
+                .push_bind(&emote.file_name)
+                .push_bind(&emote.url)
+                .push_bind(&emote.owner)
+                .push_bind(&emote.tags)
+                .push_bind(emote.animated.unwrap_or(false))
+                .push_bind(db_folder);
+        });
+        qb.build().execute(&mut *tx).await?;
     }
 
     tx.commit().await?;
@@ -123,31 +121,30 @@ async fn persist_user_emotes(
     .execute(&mut *tx)
     .await?;
 
-    for emote in emotes {
-        sqlx::query(
-            r#"
-            INSERT INTO stickers (seven_tv_id, emote_name, file_name, url, owner_name, tags, animated, folder_name)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            ON CONFLICT (seven_tv_id, folder_name)
-            DO UPDATE SET
-                emote_name = EXCLUDED.emote_name,
-                file_name = EXCLUDED.file_name,
-                url = EXCLUDED.url,
-                owner_name = EXCLUDED.owner_name,
-                tags = EXCLUDED.tags,
-                animated = EXCLUDED.animated
-            "#,
-        )
-        .bind(&emote.emote_id)
-        .bind(&emote.emote_name)
-        .bind(&emote.file_name)
-        .bind(&emote.url)
-        .bind(&emote.owner)
-        .bind(&emote.tags)
-        .bind(emote.animated.unwrap_or(false))
-        .bind(folder)
-        .execute(&mut *tx)
-        .await?;
+    if !emotes.is_empty() {
+        let mut qb = sqlx::QueryBuilder::new(
+            "INSERT INTO stickers (seven_tv_id, emote_name, file_name, url, owner_name, tags, animated, folder_name) ",
+        );
+        qb.push_values(emotes, |mut b, emote| {
+            b.push_bind(&emote.emote_id)
+                .push_bind(&emote.emote_name)
+                .push_bind(&emote.file_name)
+                .push_bind(&emote.url)
+                .push_bind(&emote.owner)
+                .push_bind(&emote.tags)
+                .push_bind(emote.animated.unwrap_or(false))
+                .push_bind(folder);
+        });
+        qb.push(
+            " ON CONFLICT (seven_tv_id, folder_name) DO UPDATE SET \
+             emote_name = EXCLUDED.emote_name, \
+             file_name = EXCLUDED.file_name, \
+             url = EXCLUDED.url, \
+             owner_name = EXCLUDED.owner_name, \
+             tags = EXCLUDED.tags, \
+             animated = EXCLUDED.animated",
+        );
+        qb.build().execute(&mut *tx).await?;
     }
 
     tx.commit().await?;
