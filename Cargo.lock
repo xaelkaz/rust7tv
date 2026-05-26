@@ -1964,6 +1964,7 @@ dependencies = [
  "axum",
  "azure_storage",
  "azure_storage_blobs",
+ "base64 0.22.1",
  "chrono",
  "dotenvy",
  "futures",

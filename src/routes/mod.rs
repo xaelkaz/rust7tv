@@ -2,29 +2,48 @@ use axum::{
     routing::{get, post, delete},
     Router,
     Json,
+    middleware,
     extract::{State, Query, Path},
 };
 use std::sync::Arc;
+use tower_http::cors::{Any, CorsLayer};
 use crate::AppState;
 use crate::models::{TrendingPeriod, SearchResponse, SyncTrendingRequest, EmoteResponse, TrendingTagResponse, TrendingTag};
 use serde::{Deserialize, Serialize};
 
+mod auth;
 mod dashboard;
 
 pub fn create_router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let public = Router::new()
         .route("/", get(root_handler))
         .route("/health", get(health_handler))
-        .route("/admin/dashboard", get(dashboard::dashboard_handler))
         .route("/api/search-emotes", post(search_emotes_handler))
         .route("/api/trending/tags", get(trending_tags_handler))
         .route("/api/trending/emotes", get(trending_emotes_handler))
-        .route("/api/admin/sync-trending", post(sync_trending_handler))
         .route("/api/trending/synced", get(synced_trending_emotes_handler))
+        .route("/api/user/emotes/saved", get(get_saved_user_emotes_handler));
+
+    let admin = Router::new()
+        .route("/admin/dashboard", get(dashboard::dashboard_handler))
+        .route("/api/admin/sync-trending", post(sync_trending_handler))
         .route("/api/admin/sync-user-emotes", post(sync_user_emotes_handler))
-        .route("/api/user/emotes/saved", get(get_saved_user_emotes_handler))
         .route("/api/admin/users", get(list_users_handler))
         .route("/api/admin/users/:folder_name", delete(delete_user_handler))
+        .route_layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            auth::require_admin,
+        ));
+
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
+    Router::new()
+        .merge(public)
+        .merge(admin)
+        .layer(cors)
         .with_state(state)
 }
 
