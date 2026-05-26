@@ -1,3 +1,5 @@
+use azure_core::prelude::IfMatchCondition;
+use azure_core::StatusCode;
 use azure_storage::StorageCredentials;
 use azure_storage_blobs::prelude::*;
 use std::sync::Arc;
@@ -68,23 +70,33 @@ impl StorageService {
         let container_client = client.container_client(&self.container_name);
         let blob_client = container_client.blob_client(blob_name);
 
-        // Check if exists
-        match blob_client.get_properties().into_future().await {
-            Ok(_) => {
-                return Ok(format!("https://{}.blob.core.windows.net/{}/{}", 
-                    self.account_name, self.container_name, blob_name));
-            }
-            Err(_) => {} // Assume not found or other error
-        }
+        let blob_url = format!(
+            "https://{}.blob.core.windows.net/{}/{}",
+            self.account_name, self.container_name, blob_name
+        );
 
-        blob_client
+        // `If-None-Match: *` makes the upload conditional on the blob NOT
+        // existing. If it already exists Azure returns 409 Conflict, which we
+        // treat as success ("already uploaded, here's the URL"). This is
+        // race-safe — two concurrent callers can't both win the upload.
+        let result = blob_client
             .put_block_blob(data)
             .content_type(content_type.to_string())
+            .if_match(IfMatchCondition::NotMatch("*".to_string()))
             .into_future()
-            .await?;
+            .await;
 
-        Ok(format!("https://{}.blob.core.windows.net/{}/{}", 
-            self.account_name, self.container_name, blob_name))
+        match result {
+            Ok(_) => Ok(blob_url),
+            Err(e) => {
+                if let Some(http_err) = e.as_http_error() {
+                    if http_err.status() == StatusCode::Conflict {
+                        return Ok(blob_url);
+                    }
+                }
+                Err(Box::new(e))
+            }
+        }
     }
 
     pub async fn delete_blobs_by_prefix(

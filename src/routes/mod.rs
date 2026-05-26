@@ -4,6 +4,7 @@ use axum::{
     Json,
     middleware,
     extract::{State, Query, Path},
+    http::StatusCode,
 };
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
@@ -45,6 +46,112 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .merge(admin)
         .layer(cors)
         .with_state(state)
+}
+
+/// Folder names are used as Azure blob prefixes and as SQL bind params.
+/// Restrict to a safe ASCII subset so an empty/malicious value can't wipe the
+/// whole container (e.g. `folder_name=""` → `prefix="/"` would list all blobs).
+fn valid_folder_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Atomic replace: `DELETE` existing stickers for the folder and `INSERT` the
+/// new batch. All-or-nothing — a mid-loop failure rolls back via the tx Drop.
+async fn persist_trending_stickers(
+    pool: &sqlx::PgPool,
+    db_folder: &str,
+    emotes: &[EmoteResponse],
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    sqlx::query("DELETE FROM stickers WHERE folder_name = $1")
+        .bind(db_folder)
+        .execute(&mut *tx)
+        .await?;
+
+    for emote in emotes {
+        sqlx::query(
+            r#"
+            INSERT INTO stickers (seven_tv_id, emote_name, file_name, url, owner_name, tags, animated, folder_name)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            "#,
+        )
+        .bind(&emote.emote_id)
+        .bind(&emote.emote_name)
+        .bind(&emote.file_name)
+        .bind(&emote.url)
+        .bind(&emote.owner)
+        .bind(&emote.tags)
+        .bind(emote.animated.unwrap_or(false))
+        .bind(db_folder)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Upsert the user record and all of their stickers atomically.
+async fn persist_user_emotes(
+    pool: &sqlx::PgPool,
+    user_id: &str,
+    folder: &str,
+    display_name: &str,
+    emotes: &[EmoteResponse],
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO users (seven_tv_id, folder_name, display_name, last_synced_at, emote_count)
+        VALUES ($1, $2, $3, NOW(), $4)
+        ON CONFLICT (folder_name)
+        DO UPDATE SET
+            seven_tv_id = EXCLUDED.seven_tv_id,
+            display_name = EXCLUDED.display_name,
+            last_synced_at = NOW(),
+            emote_count = EXCLUDED.emote_count
+        "#,
+    )
+    .bind(user_id)
+    .bind(folder)
+    .bind(display_name)
+    .bind(emotes.len() as i32)
+    .execute(&mut *tx)
+    .await?;
+
+    for emote in emotes {
+        sqlx::query(
+            r#"
+            INSERT INTO stickers (seven_tv_id, emote_name, file_name, url, owner_name, tags, animated, folder_name)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (seven_tv_id, folder_name)
+            DO UPDATE SET
+                emote_name = EXCLUDED.emote_name,
+                file_name = EXCLUDED.file_name,
+                url = EXCLUDED.url,
+                owner_name = EXCLUDED.owner_name,
+                tags = EXCLUDED.tags,
+                animated = EXCLUDED.animated
+            "#,
+        )
+        .bind(&emote.emote_id)
+        .bind(&emote.emote_name)
+        .bind(&emote.file_name)
+        .bind(&emote.url)
+        .bind(&emote.owner)
+        .bind(&emote.tags)
+        .bind(emote.animated.unwrap_or(false))
+        .bind(folder)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(())
 }
 
 async fn root_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
@@ -191,7 +298,7 @@ async fn trending_emotes_handler(
 async fn sync_trending_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<SyncTrendingRequest>,
-) -> Json<SearchResponse> {
+) -> (StatusCode, Json<SearchResponse>) {
     let animated_only = payload.animated_only.unwrap_or(false);
     let period_str = payload.period.unwrap_or_else(|| "trending_weekly".to_string());
     
@@ -235,59 +342,59 @@ async fn sync_trending_handler(
 
             // Save trending stickers to database with a special folder name
             let db_folder = format!("trending_sync:{}:{}", period_str, animated_only);
-            
-            // First, clear existing stickers for this trending category in DB
-            let _ = sqlx::query("DELETE FROM stickers WHERE folder_name = $1")
-                .bind(&db_folder)
-                .execute(&state.db)
-                .await;
 
-            for emote in &processed {
-                let _ = sqlx::query(
-                    r#"
-                    INSERT INTO stickers (seven_tv_id, emote_name, file_name, url, owner_name, tags, animated, folder_name)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                    "#
-                )
-                .bind(&emote.emote_id)
-                .bind(&emote.emote_name)
-                .bind(&emote.file_name)
-                .bind(&emote.url)
-                .bind(&emote.owner)
-                .bind(&emote.tags)
-                .bind(emote.animated.unwrap_or(false))
-                .bind(&db_folder)
-                .execute(&state.db)
-                .await;
+            if let Err(e) = persist_trending_stickers(&state.db, &db_folder, &processed).await {
+                tracing::error!("Failed to persist trending stickers (rolled back): {:?}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(SearchResponse {
+                        success: false,
+                        total_found: 0,
+                        emotes: vec![],
+                        message: Some(format!("Database error: {}", e)),
+                        cached: Some(false),
+                        processing_time: None,
+                        page: None,
+                        total_pages: None,
+                        results_per_page: None,
+                        has_next_page: None,
+                    }),
+                );
             }
 
-            Json(SearchResponse {
-                success: true,
-                total_found: processed.len() as i32,
-                emotes: processed,
-                message: Some("Synced successfully".to_string()),
-                cached: Some(false),
-                processing_time: None,
-                page: Some(1),
-                total_pages: Some(1),
-                results_per_page: Some(limit),
-                has_next_page: Some(false),
-            })
+            (
+                StatusCode::OK,
+                Json(SearchResponse {
+                    success: true,
+                    total_found: processed.len() as i32,
+                    emotes: processed,
+                    message: Some("Synced successfully".to_string()),
+                    cached: Some(false),
+                    processing_time: None,
+                    page: Some(1),
+                    total_pages: Some(1),
+                    results_per_page: Some(limit),
+                    has_next_page: Some(false),
+                }),
+            )
         },
         Err(e) => {
             tracing::error!("Failed to sync trending emotes: {:?}", e);
-            Json(SearchResponse {
-                success: false,
-                total_found: 0,
-                emotes: vec![],
-                message: Some(e.to_string()),
-                cached: Some(false),
-                processing_time: None,
-                page: None,
-                total_pages: None,
-                results_per_page: None,
-                has_next_page: None,
-            })
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(SearchResponse {
+                    success: false,
+                    total_found: 0,
+                    emotes: vec![],
+                    message: Some(e.to_string()),
+                    cached: Some(false),
+                    processing_time: None,
+                    page: None,
+                    total_pages: None,
+                    results_per_page: None,
+                    has_next_page: None,
+                }),
+            )
         }
     }
 }
@@ -442,11 +549,31 @@ fn return_paginated_response(all_emotes: Vec<EmoteResponse>, limit: usize) -> Js
 async fn sync_user_emotes_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<crate::models::SyncUserEmotesRequest>,
-) -> Json<SearchResponse> {
+) -> (StatusCode, Json<SearchResponse>) {
     let limit = payload.limit.unwrap_or(100);
     let folder = payload.folder_name;
 
-    // Removed: We no longer cleanup existing blobs in that user folder to prevent breaking user favorites. 
+    if !valid_folder_name(&folder) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(SearchResponse {
+                success: false,
+                total_found: 0,
+                emotes: vec![],
+                message: Some(
+                    "Invalid folder_name: must be 1-64 chars of [A-Za-z0-9_-]".to_string(),
+                ),
+                cached: Some(false),
+                processing_time: None,
+                page: None,
+                total_pages: None,
+                results_per_page: None,
+                has_next_page: None,
+            }),
+        );
+    }
+
+    // Removed: We no longer cleanup existing blobs in that user folder to prevent breaking user favorites.
     // The ON CONFLICT DO UPDATE handles database logical cleanup and override.
 
     match state.seventv.fetch_user_emotes(&payload.user_id, limit).await {
@@ -468,86 +595,66 @@ async fn sync_user_emotes_handler(
                 "Unknown".to_string()
             };
 
-            let emote_count = processed.len() as i32;
-            
-            let query_result = sqlx::query(
-                r#"
-                INSERT INTO users (seven_tv_id, folder_name, display_name, last_synced_at, emote_count)
-                VALUES ($1, $2, $3, NOW(), $4)
-                ON CONFLICT (folder_name) 
-                DO UPDATE SET 
-                    seven_tv_id = EXCLUDED.seven_tv_id,
-                    display_name = EXCLUDED.display_name,
-                    last_synced_at = NOW(),
-                    emote_count = EXCLUDED.emote_count
-                "#
+            if let Err(e) = persist_user_emotes(
+                &state.db,
+                &payload.user_id,
+                &folder,
+                &user_display_name,
+                &processed,
             )
-            .bind(payload.user_id)
-            .bind(&folder)
-            .bind(user_display_name)
-            .bind(emote_count)
-            .execute(&state.db)
-            .await;
-
-            if let Err(e) = query_result {
-                tracing::error!("Failed to update user record in DB: {:?}", e);
+            .await
+            {
+                tracing::error!("Failed to persist user emotes (rolled back): {:?}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(SearchResponse {
+                        success: false,
+                        total_found: 0,
+                        emotes: vec![],
+                        message: Some(format!("Database error: {}", e)),
+                        cached: Some(false),
+                        processing_time: None,
+                        page: None,
+                        total_pages: None,
+                        results_per_page: None,
+                        has_next_page: None,
+                    }),
+                );
             }
 
-            // Insert stickers into database
-            for emote in &processed {
-                let _ = sqlx::query(
-                    r#"
-                    INSERT INTO stickers (seven_tv_id, emote_name, file_name, url, owner_name, tags, animated, folder_name)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                    ON CONFLICT (seven_tv_id, folder_name) 
-                    DO UPDATE SET 
-                        emote_name = EXCLUDED.emote_name,
-                        file_name = EXCLUDED.file_name,
-                        url = EXCLUDED.url,
-                        owner_name = EXCLUDED.owner_name,
-                        tags = EXCLUDED.tags,
-                        animated = EXCLUDED.animated
-                    "#
-                )
-                .bind(&emote.emote_id)
-                .bind(&emote.emote_name)
-                .bind(&emote.file_name)
-                .bind(&emote.url)
-                .bind(&emote.owner)
-                .bind(&emote.tags)
-                .bind(emote.animated.unwrap_or(false))
-                .bind(&folder)
-                .execute(&state.db)
-                .await;
-            }
-
-            Json(SearchResponse {
-                success: true,
-                total_found: processed.len() as i32,
-                emotes: processed,
-                message: Some("User emotes synced successfully".to_string()),
-                cached: Some(false),
-                processing_time: None,
-                page: Some(1),
-                total_pages: Some(1),
-                results_per_page: Some(limit),
-                has_next_page: Some(false),
-            })
+            (
+                StatusCode::OK,
+                Json(SearchResponse {
+                    success: true,
+                    total_found: processed.len() as i32,
+                    emotes: processed,
+                    message: Some("User emotes synced successfully".to_string()),
+                    cached: Some(false),
+                    processing_time: None,
+                    page: Some(1),
+                    total_pages: Some(1),
+                    results_per_page: Some(limit),
+                    has_next_page: Some(false),
+                }),
+            )
         },
         Err(e) => {
             tracing::error!("Failed to sync user emotes: {:?}", e);
-            Json(SearchResponse {
-                success: false,
-                total_found: 0,
-                emotes: vec![],
-                message: Some(e.to_string()),
-                cached: Some(false),
-                processing_time: None,
-                page: None,
-                total_pages: None,
-                results_per_page: None,
-                has_next_page: None,
-            })
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(SearchResponse {
+                    success: false,
+                    total_found: 0,
+                    emotes: vec![],
+                    message: Some(e.to_string()),
+                    cached: Some(false),
+                    processing_time: None,
+                    page: None,
+                    total_pages: None,
+                    results_per_page: None,
+                    has_next_page: None,
+                }),
+            )
         }
     }
 }
@@ -691,17 +798,32 @@ async fn list_users_handler(
 async fn delete_user_handler(
     State(state): State<Arc<AppState>>,
     Path(folder_name): Path<String>,
-) -> Json<DeleteResponse> {
+) -> (StatusCode, Json<DeleteResponse>) {
+    if !valid_folder_name(&folder_name) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(DeleteResponse {
+                success: false,
+                message: Some(
+                    "Invalid folder_name: must be 1-64 chars of [A-Za-z0-9_-]".to_string(),
+                ),
+            }),
+        );
+    }
+
     if let Err(e) = sqlx::query("DELETE FROM stickers WHERE folder_name = $1")
         .bind(&folder_name)
         .execute(&state.db)
         .await
     {
         tracing::error!("Failed to delete stickers for {}: {:?}", folder_name, e);
-        return Json(DeleteResponse {
-            success: false,
-            message: Some(format!("Failed to delete stickers: {}", e)),
-        });
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(DeleteResponse {
+                success: false,
+                message: Some(format!("Failed to delete stickers: {}", e)),
+            }),
+        );
     }
 
     let user_delete = sqlx::query("DELETE FROM users WHERE folder_name = $1")
@@ -713,18 +835,24 @@ async fn delete_user_handler(
         Ok(res) => res.rows_affected(),
         Err(e) => {
             tracing::error!("Failed to delete user {}: {:?}", folder_name, e);
-            return Json(DeleteResponse {
-                success: false,
-                message: Some(format!("Failed to delete user: {}", e)),
-            });
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(DeleteResponse {
+                    success: false,
+                    message: Some(format!("Failed to delete user: {}", e)),
+                }),
+            );
         }
     };
 
     if rows_affected == 0 {
-        return Json(DeleteResponse {
-            success: false,
-            message: Some("User not found".to_string()),
-        });
+        return (
+            StatusCode::NOT_FOUND,
+            Json(DeleteResponse {
+                success: false,
+                message: Some("User not found".to_string()),
+            }),
+        );
     }
 
     let blob_prefix = format!("{}/", folder_name);
@@ -741,12 +869,19 @@ async fn delete_user_handler(
         warnings.push(format!("cache cleanup failed: {}", e));
     }
 
-    Json(DeleteResponse {
-        success: true,
-        message: if warnings.is_empty() {
-            Some(format!("User '{}' deleted", folder_name))
-        } else {
-            Some(format!("User '{}' deleted with warnings: {}", folder_name, warnings.join("; ")))
-        },
-    })
+    (
+        StatusCode::OK,
+        Json(DeleteResponse {
+            success: true,
+            message: if warnings.is_empty() {
+                Some(format!("User '{}' deleted", folder_name))
+            } else {
+                Some(format!(
+                    "User '{}' deleted with warnings: {}",
+                    folder_name,
+                    warnings.join("; ")
+                ))
+            },
+        }),
+    )
 }
