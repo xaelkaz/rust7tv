@@ -75,7 +75,7 @@ impl SevenTVService {
             .pool_idle_timeout(std::time::Duration::from_secs(90))
             .pool_max_idle_per_host(10)
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+            .expect("failed to build reqwest client for SevenTV");
 
         Self {
             client,
