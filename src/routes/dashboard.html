@@ -76,10 +76,10 @@
         </div>
 
         <!-- Sync Content Area -->
-        <div class="h-64 relative"> <!-- Fixed height container to prevent layout jumps -->
+        <div> <!-- Tabs grow with content; inactive tab is hidden via .hidden -->
 
             <!-- CONTENIDO TAB 1: Trending Sync -->
-            <div id="tab-trending" class="absolute inset-0 transition-opacity duration-300 opacity-100 z-10">
+            <div id="tab-trending">
                 <div class="card rounded-xl p-6 shadow-xl h-full">
                     <h2 class="text-xl font-semibold mb-4 flex items-center gap-2">
                         <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
@@ -143,21 +143,30 @@
             </div>
 
             <!-- CONTENIDO TAB 2: User Sync -->
-            <div id="tab-users"
-                class="absolute inset-0 transition-opacity duration-300 opacity-0 pointer-events-none z-0">
-                <div class="card rounded-xl p-6 shadow-xl h-full flex flex-col justify-center">
-                    <h2 class="text-xl font-semibold mb-4 flex items-center gap-2">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
-                            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-                            class="text-purple-400">
-                            <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-                            <circle cx="8.5" cy="7" r="4" />
-                            <line x1="20" y1="8" x2="20" y2="14" />
-                            <line x1="23" y1="11" x2="17" y2="11" />
-                        </svg>
-                        User Sync Controls
-                    </h2>
-                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+            <div id="tab-users" class="hidden">
+                <div class="card rounded-xl p-6 shadow-xl h-full flex flex-col">
+                    <div class="flex justify-between items-center mb-4">
+                        <h2 class="text-xl font-semibold flex items-center gap-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
+                                stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                                class="text-purple-400">
+                                <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                                <circle cx="8.5" cy="7" r="4" />
+                                <line x1="20" y1="8" x2="20" y2="14" />
+                                <line x1="23" y1="11" x2="17" y2="11" />
+                            </svg>
+                            User Sync Controls
+                        </h2>
+                        <div class="flex gap-2 text-xs">
+                            <button onclick="switchUserSubTab('add')" id="subbtn-add"
+                                class="px-3 py-1 rounded-lg bg-purple-600 text-white transition-colors">Add User</button>
+                            <button onclick="switchUserSubTab('manage')" id="subbtn-manage"
+                                class="px-3 py-1 rounded-lg bg-gray-700 text-gray-300 hover:bg-gray-600 transition-colors">Manage Users</button>
+                        </div>
+                    </div>
+
+                    <!-- Sub-panel: Add -->
+                    <div id="subpanel-add" class="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
                         <div>
                             <label class="block text-xs font-medium text-gray-400 mb-1">7TV User ID</label>
                             <input type="text" id="userIdInput" placeholder="e.g. 01GDZT..."
@@ -172,6 +181,13 @@
                             class="btn bg-purple-600 hover:bg-purple-500 text-white px-4 py-2 rounded-lg text-sm h-[38px] flex items-center justify-center gap-2">
                             Sync User
                         </button>
+                    </div>
+
+                    <!-- Sub-panel: Manage -->
+                    <div id="subpanel-manage" class="hidden">
+                        <div id="usersList" class="space-y-2 max-h-96 overflow-y-auto pr-1">
+                            <div class="text-gray-500 text-sm text-center py-6">Loading users...</div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -229,6 +245,29 @@
             </div>
         </div>
 
+        <!-- Delete User Confirmation Modal -->
+        <div id="deleteUserModal"
+            class="hidden fixed inset-0 bg-black/80 flex items-center justify-center z-50 backdrop-blur-sm">
+            <div class="card bg-[#1e1e24] p-8 rounded-2xl shadow-2xl max-w-md w-full border border-red-700/40">
+                <h3 class="text-2xl font-bold text-white mb-2">Delete User</h3>
+                <p class="text-gray-400 mb-6">
+                    This will permanently remove
+                    <b><span id="deleteUserTarget" class="text-red-400"></span></b>
+                    — including its database rows and storage blobs. This cannot be undone.
+                </p>
+                <div class="flex gap-4 justify-end">
+                    <button onclick="closeDeleteModal()"
+                        class="px-5 py-2 rounded-lg text-gray-300 hover:text-white hover:bg-gray-700 transition-colors font-medium">
+                        Cancel
+                    </button>
+                    <button onclick="executeDeleteUser()"
+                        class="px-5 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white shadow-lg shadow-red-600/20 transition-all font-medium">
+                        Delete
+                    </button>
+                </div>
+            </div>
+        </div>
+
         <!-- Confirmation Modal -->
         <div id="confirmModal"
             class="hidden fixed inset-0 bg-black/80 flex items-center justify-center z-50 backdrop-blur-sm">
@@ -259,6 +298,8 @@
     <script>
         const SYNC_LIMIT = 250;
         let pendingSync = null;
+        let pendingDeleteFolder = null;
+        let usersLoaded = false;
 
         // Tab Switching Logic
         function switchTab(tabName) {
@@ -282,17 +323,188 @@
             const tabUsers = document.getElementById('tab-users');
 
             if (tabName === 'trending') {
-                tabTrending.classList.remove('opacity-0', 'pointer-events-none');
-                tabTrending.classList.add('opacity-100', 'z-10');
-
-                tabUsers.classList.remove('opacity-100', 'z-10');
-                tabUsers.classList.add('opacity-0', 'pointer-events-none');
+                tabTrending.classList.remove('hidden');
+                tabUsers.classList.add('hidden');
             } else {
-                tabUsers.classList.remove('opacity-0', 'pointer-events-none');
-                tabUsers.classList.add('opacity-100', 'z-10');
+                tabUsers.classList.remove('hidden');
+                tabTrending.classList.add('hidden');
+            }
+        }
 
-                tabTrending.classList.remove('opacity-100', 'z-10');
-                tabTrending.classList.add('opacity-0', 'pointer-events-none');
+        // Sub-tab switching inside User Sync
+        function switchUserSubTab(name) {
+            const add = document.getElementById('subpanel-add');
+            const manage = document.getElementById('subpanel-manage');
+            const btnAdd = document.getElementById('subbtn-add');
+            const btnManage = document.getElementById('subbtn-manage');
+
+            [btnAdd, btnManage].forEach(b => {
+                b.classList.remove('bg-purple-600', 'text-white');
+                b.classList.add('bg-gray-700', 'text-gray-300', 'hover:bg-gray-600');
+            });
+
+            const activeBtn = name === 'add' ? btnAdd : btnManage;
+            activeBtn.classList.remove('bg-gray-700', 'text-gray-300', 'hover:bg-gray-600');
+            activeBtn.classList.add('bg-purple-600', 'text-white');
+
+            if (name === 'add') {
+                add.classList.remove('hidden');
+                manage.classList.add('hidden');
+            } else {
+                manage.classList.remove('hidden');
+                add.classList.add('hidden');
+                if (!usersLoaded) loadUsersList();
+            }
+        }
+
+        function formatRelative(iso) {
+            if (!iso) return 'never';
+            const then = new Date(iso).getTime();
+            const diff = (Date.now() - then) / 1000;
+            if (diff < 60) return 'just now';
+            if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+            if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+            return Math.floor(diff / 86400) + 'd ago';
+        }
+
+        // Render the users list using safe DOM construction (textContent, no innerHTML
+        // with interpolated data) to avoid any XSS exposure from 7TV-provided strings.
+        function renderUsersList(users) {
+            const list = document.getElementById('usersList');
+            list.replaceChildren();
+            if (!users || users.length === 0) {
+                const empty = document.createElement('div');
+                empty.className = 'text-gray-500 text-sm text-center py-6';
+                empty.textContent = 'No users yet. Add one from the "Add User" tab.';
+                list.appendChild(empty);
+                return;
+            }
+            for (const u of users) {
+                const row = document.createElement('div');
+                row.className = 'flex items-center justify-between gap-3 p-3 bg-gray-900/50 rounded-lg border border-gray-800 hover:border-purple-500/40 transition-colors';
+
+                const left = document.createElement('div');
+                left.className = 'flex items-center gap-3 min-w-0';
+
+                const avatar = document.createElement('div');
+                avatar.className = 'w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-blue-500 flex items-center justify-center text-white font-bold flex-shrink-0';
+                avatar.textContent = (u.displayName || '?').charAt(0).toUpperCase();
+                left.appendChild(avatar);
+
+                const meta = document.createElement('div');
+                meta.className = 'min-w-0';
+
+                const topLine = document.createElement('div');
+                topLine.className = 'flex items-center gap-2';
+                const name = document.createElement('span');
+                name.className = 'text-white text-sm font-medium truncate';
+                name.textContent = u.displayName || '(unknown)';
+                const chip = document.createElement('span');
+                chip.className = 'px-2 py-0.5 rounded bg-purple-500/10 text-purple-300 text-[10px] border border-purple-500/20';
+                chip.textContent = u.folderName;
+                topLine.append(name, chip);
+
+                const subline = document.createElement('div');
+                subline.className = 'text-xs text-gray-500 truncate';
+                const count = u.emoteCount ?? 0;
+                const idShort = (u.sevenTvId || '').substring(0, 12);
+                subline.textContent = `${count} emotes · last sync ${formatRelative(u.lastSyncedAt)} · ${idShort}...`;
+
+                meta.append(topLine, subline);
+                left.appendChild(meta);
+
+                const actions = document.createElement('div');
+                actions.className = 'flex gap-2 flex-shrink-0';
+                const syncBtn = document.createElement('button');
+                syncBtn.className = 'btn bg-purple-600 hover:bg-purple-500 text-white px-3 py-1 rounded text-xs';
+                syncBtn.textContent = 'Sync';
+                syncBtn.addEventListener('click', () => resyncUser(u.folderName, u.sevenTvId));
+                const delBtn = document.createElement('button');
+                delBtn.className = 'btn bg-red-600/20 hover:bg-red-600 hover:text-white text-red-400 border border-red-600/40 px-3 py-1 rounded text-xs';
+                delBtn.textContent = 'Delete';
+                delBtn.addEventListener('click', () => askDeleteUser(u.folderName, u.displayName));
+                actions.append(syncBtn, delBtn);
+
+                row.append(left, actions);
+                list.appendChild(row);
+            }
+        }
+
+        async function loadUsersList() {
+            const list = document.getElementById('usersList');
+            list.replaceChildren();
+            const loading = document.createElement('div');
+            loading.className = 'text-gray-500 text-sm text-center py-6';
+            loading.textContent = 'Loading users...';
+            list.appendChild(loading);
+            try {
+                const response = await fetch('/api/admin/users');
+                const data = await response.json();
+                if (!data.success) {
+                    renderUsersList([]);
+                    usersLoaded = true;
+                    return;
+                }
+                renderUsersList(data.users || []);
+                usersLoaded = true;
+            } catch (err) {
+                list.replaceChildren();
+                const e = document.createElement('div');
+                e.className = 'text-red-400 text-sm text-center py-6';
+                e.textContent = 'Failed to load users: ' + err.message;
+                list.appendChild(e);
+            }
+        }
+
+        async function resyncUser(folderName, userId) {
+            const startTime = Date.now();
+            log(`Re-syncing <b>${folderName}</b>...`, 'loading');
+            try {
+                const response = await fetch('/api/admin/sync-user-emotes', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ userId, folderName, limit: SYNC_LIMIT })
+                });
+                const data = await response.json();
+                const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+                if (response.ok && data.success) {
+                    log(`Re-sync done for <b>${folderName}</b>: ${data.totalFound} emotes (${duration}s)`, 'success');
+                    loadUsersList();
+                } else {
+                    log(`Re-sync failed: ${data.message || 'Unknown error'}`, 'error');
+                }
+            } catch (err) {
+                log(`Network Error: ${err.message}`, 'error');
+            }
+        }
+
+        function askDeleteUser(folderName, displayName) {
+            pendingDeleteFolder = folderName;
+            document.getElementById('deleteUserTarget').textContent = `${displayName} (${folderName})`;
+            document.getElementById('deleteUserModal').classList.remove('hidden');
+        }
+
+        function closeDeleteModal() {
+            document.getElementById('deleteUserModal').classList.add('hidden');
+            pendingDeleteFolder = null;
+        }
+
+        async function executeDeleteUser() {
+            if (!pendingDeleteFolder) return;
+            const folder = pendingDeleteFolder;
+            closeDeleteModal();
+            log(`Deleting <b>${folder}</b>...`, 'loading');
+            try {
+                const response = await fetch('/api/admin/users/' + encodeURIComponent(folder), { method: 'DELETE' });
+                const data = await response.json();
+                if (response.ok && data.success) {
+                    log(`Deleted: ${data.message || folder}`, 'success');
+                    loadUsersList();
+                } else {
+                    log(`Delete failed: ${data.message || 'Unknown error'}`, 'error');
+                }
+            } catch (err) {
+                log(`Network Error: ${err.message}`, 'error');
             }
         }
 
@@ -404,6 +616,10 @@
 
                 if (response.ok && data.success) {
                     log(`✅ User Sync Finished! Found ${data.totalFound} emotes for folder: ${folderName}. (Took ${duration}s)`, 'success');
+                    document.getElementById('userIdInput').value = '';
+                    document.getElementById('folderNameInput').value = '';
+                    usersLoaded = false;
+                    loadUsersList();
                 } else {
                     log(`❌ User Sync Failed: ${data.message || 'Unknown error'}`, 'error');
                 }

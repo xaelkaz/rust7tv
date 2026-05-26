@@ -1,8 +1,8 @@
 use axum::{
-    routing::{get, post},
+    routing::{get, post, delete},
     Router,
     Json,
-    extract::{State, Query},
+    extract::{State, Query, Path},
 };
 use std::sync::Arc;
 use crate::AppState;
@@ -24,6 +24,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/admin/sync-user-emotes", post(sync_user_emotes_handler))
         .route("/api/user/emotes/saved", get(get_saved_user_emotes_handler))
         .route("/api/admin/users", get(list_users_handler))
+        .route("/api/admin/users/:folder_name", delete(delete_user_handler))
         .with_state(state)
 }
 
@@ -618,6 +619,7 @@ struct StickerRow {
 }
 
 #[derive(Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
 struct UserRecord {
     id: i32,
     seven_tv_id: String,
@@ -629,9 +631,18 @@ struct UserRecord {
 
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct UsersListResponse {
     success: bool,
     users: Vec<UserRecord>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteResponse {
+    success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
 }
 
 async fn list_users_handler(
@@ -656,4 +667,67 @@ async fn list_users_handler(
             })
         }
     }
+}
+
+async fn delete_user_handler(
+    State(state): State<Arc<AppState>>,
+    Path(folder_name): Path<String>,
+) -> Json<DeleteResponse> {
+    if let Err(e) = sqlx::query("DELETE FROM stickers WHERE folder_name = $1")
+        .bind(&folder_name)
+        .execute(&state.db)
+        .await
+    {
+        tracing::error!("Failed to delete stickers for {}: {:?}", folder_name, e);
+        return Json(DeleteResponse {
+            success: false,
+            message: Some(format!("Failed to delete stickers: {}", e)),
+        });
+    }
+
+    let user_delete = sqlx::query("DELETE FROM users WHERE folder_name = $1")
+        .bind(&folder_name)
+        .execute(&state.db)
+        .await;
+
+    let rows_affected = match user_delete {
+        Ok(res) => res.rows_affected(),
+        Err(e) => {
+            tracing::error!("Failed to delete user {}: {:?}", folder_name, e);
+            return Json(DeleteResponse {
+                success: false,
+                message: Some(format!("Failed to delete user: {}", e)),
+            });
+        }
+    };
+
+    if rows_affected == 0 {
+        return Json(DeleteResponse {
+            success: false,
+            message: Some("User not found".to_string()),
+        });
+    }
+
+    let blob_prefix = format!("{}/", folder_name);
+    let mut warnings: Vec<String> = Vec::new();
+
+    if let Err(e) = state.storage.delete_blobs_by_prefix(&blob_prefix).await {
+        tracing::error!("Failed to delete blobs for {}: {:?}", folder_name, e);
+        warnings.push(format!("blob cleanup failed: {}", e));
+    }
+
+    let cache_key = format!("user_emotes:{}", folder_name);
+    if let Err(e) = state.cache.clear_cache(&cache_key).await {
+        tracing::warn!("Failed to clear cache key {}: {:?}", cache_key, e);
+        warnings.push(format!("cache cleanup failed: {}", e));
+    }
+
+    Json(DeleteResponse {
+        success: true,
+        message: if warnings.is_empty() {
+            Some(format!("User '{}' deleted", folder_name))
+        } else {
+            Some(format!("User '{}' deleted with warnings: {}", folder_name, warnings.join("; ")))
+        },
+    })
 }
