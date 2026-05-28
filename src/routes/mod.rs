@@ -24,10 +24,6 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/trending/emotes", get(trending_emotes_handler))
         .route("/api/trending/synced", get(synced_trending_emotes_handler))
         .route("/api/user/emotes/saved", get(get_saved_user_emotes_handler))
-        // Listing users is a read-only feature the client app needs, so it is
-        // public. `/api/users` is the canonical path; `/api/admin/users` is kept
-        // as a public alias so existing app builds keep working. The destructive
-        // DELETE on a user stays admin-protected below.
         .route("/api/users", get(list_users_handler))
         .route("/api/admin/users", get(list_users_handler));
 
