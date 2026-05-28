@@ -23,13 +23,14 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/trending/tags", get(trending_tags_handler))
         .route("/api/trending/emotes", get(trending_emotes_handler))
         .route("/api/trending/synced", get(synced_trending_emotes_handler))
-        .route("/api/user/emotes/saved", get(get_saved_user_emotes_handler));
+        .route("/api/user/emotes/saved", get(get_saved_user_emotes_handler))
+        .route("/api/users", get(list_users_handler))
+        .route("/api/admin/users", get(list_users_handler));
 
     let admin = Router::new()
         .route("/admin/dashboard", get(dashboard::dashboard_handler))
         .route("/api/admin/sync-trending", post(sync_trending_handler))
         .route("/api/admin/sync-user-emotes", post(sync_user_emotes_handler))
-        .route("/api/admin/users", get(list_users_handler))
         .route("/api/admin/users/:folder_name", delete(delete_user_handler))
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&state),
