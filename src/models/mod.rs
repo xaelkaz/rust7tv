@@ -95,6 +95,7 @@ pub struct SyncUserEmotesRequest {
     pub user_id: String,
     pub limit: Option<i32>,
     pub folder_name: String,
+    pub image_url: Option<String>,
 }
 
 #[derive(Deserialize)]

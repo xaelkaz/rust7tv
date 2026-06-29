@@ -166,7 +166,7 @@
                     </div>
 
                     <!-- Sub-panel: Add -->
-                    <div id="subpanel-add" class="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+                    <div id="subpanel-add" class="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
                         <div>
                             <label class="block text-xs font-medium text-gray-400 mb-1">7TV User ID</label>
                             <input type="text" id="userIdInput" placeholder="e.g. 01GDZT..."
@@ -175,6 +175,11 @@
                         <div>
                             <label class="block text-xs font-medium text-gray-400 mb-1">Folder Name</label>
                             <input type="text" id="folderNameInput" placeholder="e.g. BaityBait"
+                                class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500 transition-colors">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-400 mb-1">Image URL</label>
+                            <input type="url" id="userImageUrlInput" placeholder="https://..."
                                 class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500 transition-colors">
                         </div>
                         <button onclick="triggerUserSync()"
@@ -367,6 +372,23 @@
             return Math.floor(diff / 86400) + 'd ago';
         }
 
+        function isValidImageUrl(value) {
+            if (!value) return true;
+            if (/\s/.test(value)) return false;
+            try {
+                const url = new URL(value);
+                return url.protocol === 'http:' || url.protocol === 'https:';
+            } catch {
+                return false;
+            }
+        }
+
+        function applyAvatarFallback(avatar, displayName) {
+            avatar.replaceChildren();
+            avatar.className = 'w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-blue-500 flex items-center justify-center text-white font-bold flex-shrink-0';
+            avatar.textContent = (displayName || '?').charAt(0).toUpperCase();
+        }
+
         // Render the users list using safe DOM construction (textContent, no innerHTML
         // with interpolated data) to avoid any XSS exposure from 7TV-provided strings.
         function renderUsersList(users) {
@@ -387,8 +409,18 @@
                 left.className = 'flex items-center gap-3 min-w-0';
 
                 const avatar = document.createElement('div');
-                avatar.className = 'w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-blue-500 flex items-center justify-center text-white font-bold flex-shrink-0';
-                avatar.textContent = (u.displayName || '?').charAt(0).toUpperCase();
+                applyAvatarFallback(avatar, u.displayName);
+                if (u.imageUrl && isValidImageUrl(u.imageUrl)) {
+                    avatar.replaceChildren();
+                    avatar.className = 'w-10 h-10 rounded-full bg-gray-800 border border-gray-700 overflow-hidden flex-shrink-0';
+                    const image = document.createElement('img');
+                    image.src = u.imageUrl;
+                    image.alt = u.displayName || 'User image';
+                    image.referrerPolicy = 'no-referrer';
+                    image.className = 'w-full h-full object-cover';
+                    image.addEventListener('error', () => applyAvatarFallback(avatar, u.displayName), { once: true });
+                    avatar.appendChild(image);
+                }
                 left.appendChild(avatar);
 
                 const meta = document.createElement('div');
@@ -418,7 +450,7 @@
                 const syncBtn = document.createElement('button');
                 syncBtn.className = 'btn bg-purple-600 hover:bg-purple-500 text-white px-3 py-1 rounded text-xs';
                 syncBtn.textContent = 'Sync';
-                syncBtn.addEventListener('click', () => resyncUser(u.folderName, u.sevenTvId));
+                syncBtn.addEventListener('click', () => resyncUser(u.folderName, u.sevenTvId, u.imageUrl));
                 const delBtn = document.createElement('button');
                 delBtn.className = 'btn bg-red-600/20 hover:bg-red-600 hover:text-white text-red-400 border border-red-600/40 px-3 py-1 rounded text-xs';
                 delBtn.textContent = 'Delete';
@@ -456,14 +488,14 @@
             }
         }
 
-        async function resyncUser(folderName, userId) {
+        async function resyncUser(folderName, userId, imageUrl) {
             const startTime = Date.now();
             log(`Re-syncing <b>${folderName}</b>...`, 'loading');
             try {
                 const response = await fetch('/api/admin/sync-user-emotes', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ userId, folderName, limit: SYNC_LIMIT })
+                    body: JSON.stringify({ userId, folderName, imageUrl, limit: SYNC_LIMIT })
                 });
                 const data = await response.json();
                 const duration = ((Date.now() - startTime) / 1000).toFixed(2);
@@ -590,9 +622,14 @@
         async function triggerUserSync() {
             const userId = document.getElementById('userIdInput').value.trim();
             const folderName = document.getElementById('folderNameInput').value.trim();
+            const imageUrl = document.getElementById('userImageUrlInput').value.trim();
 
             if (!userId || !folderName) {
                 log('Please provide both User ID and Folder Name', 'error');
+                return;
+            }
+            if (!isValidImageUrl(imageUrl)) {
+                log('Image URL must start with http:// or https://', 'error');
                 return;
             }
 
@@ -607,6 +644,7 @@
                     body: JSON.stringify({
                         userId: userId,
                         folderName: folderName,
+                        imageUrl: imageUrl || null,
                         limit: SYNC_LIMIT
                     })
                 });
@@ -618,6 +656,7 @@
                     log(`✅ User Sync Finished! Found ${data.totalFound} emotes for folder: ${folderName}. (Took ${duration}s)`, 'success');
                     document.getElementById('userIdInput').value = '';
                     document.getElementById('folderNameInput').value = '';
+                    document.getElementById('userImageUrlInput').value = '';
                     usersLoaded = false;
                     loadUsersList();
                 } else {
