@@ -9,7 +9,7 @@ use axum::{
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use crate::AppState;
-use crate::models::{TrendingPeriod, SearchResponse, SyncTrendingRequest, EmoteResponse, TrendingTagResponse, TrendingTag};
+use crate::models::{TrendingPeriod, SearchResponse, SyncTrendingRequest, SyncUserEmotesRequest, EmoteResponse, TrendingTagResponse, TrendingTag};
 use serde::{Deserialize, Serialize};
 
 mod auth;
@@ -58,6 +58,30 @@ fn valid_folder_name(s: &str) -> bool {
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+fn normalize_image_url(image_url: Option<String>) -> Result<Option<String>, &'static str> {
+    let Some(image_url) = image_url else {
+        return Ok(None);
+    };
+
+    let image_url = image_url.trim();
+    if image_url.is_empty() {
+        return Ok(None);
+    }
+    if image_url.len() > 2048 {
+        return Err("Invalid imageUrl: must be 2048 characters or less");
+    }
+    if image_url.chars().any(char::is_whitespace) {
+        return Err("Invalid imageUrl: must not contain spaces");
+    }
+
+    let lower = image_url.to_ascii_lowercase();
+    if !lower.starts_with("https://") && !lower.starts_with("http://") {
+        return Err("Invalid imageUrl: must start with http:// or https://");
+    }
+
+    Ok(Some(image_url.to_string()))
+}
+
 /// Atomic replace: `DELETE` existing stickers for the folder and `INSERT` the
 /// new batch. All-or-nothing — a mid-loop failure rolls back via the tx Drop.
 async fn persist_trending_stickers(
@@ -99,18 +123,20 @@ async fn persist_user_emotes(
     user_id: &str,
     folder: &str,
     display_name: &str,
+    image_url: Option<&str>,
     emotes: &[EmoteResponse],
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
 
     sqlx::query(
         r#"
-        INSERT INTO users (seven_tv_id, folder_name, display_name, last_synced_at, emote_count)
-        VALUES ($1, $2, $3, NOW(), $4)
+        INSERT INTO users (seven_tv_id, folder_name, display_name, image_url, last_synced_at, emote_count)
+        VALUES ($1, $2, $3, $4, NOW(), $5)
         ON CONFLICT (folder_name)
         DO UPDATE SET
             seven_tv_id = EXCLUDED.seven_tv_id,
             display_name = EXCLUDED.display_name,
+            image_url = COALESCE(EXCLUDED.image_url, users.image_url),
             last_synced_at = NOW(),
             emote_count = EXCLUDED.emote_count
         "#,
@@ -118,6 +144,7 @@ async fn persist_user_emotes(
     .bind(user_id)
     .bind(folder)
     .bind(display_name)
+    .bind(image_url)
     .bind(emotes.len() as i32)
     .execute(&mut *tx)
     .await?;
@@ -546,10 +573,11 @@ fn return_paginated_response(all_emotes: Vec<EmoteResponse>, limit: usize) -> Js
 
 async fn sync_user_emotes_handler(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<crate::models::SyncUserEmotesRequest>,
+    Json(payload): Json<SyncUserEmotesRequest>,
 ) -> (StatusCode, Json<SearchResponse>) {
-    let limit = payload.limit.unwrap_or(100);
-    let folder = payload.folder_name;
+    let SyncUserEmotesRequest { user_id, limit, folder_name, image_url } = payload;
+    let limit = limit.unwrap_or(100);
+    let folder = folder_name;
 
     if !valid_folder_name(&folder) {
         return (
@@ -571,10 +599,31 @@ async fn sync_user_emotes_handler(
         );
     }
 
+    let image_url = match normalize_image_url(image_url) {
+        Ok(image_url) => image_url,
+        Err(message) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(SearchResponse {
+                    success: false,
+                    total_found: 0,
+                    emotes: vec![],
+                    message: Some(message.to_string()),
+                    cached: Some(false),
+                    processing_time: None,
+                    page: None,
+                    total_pages: None,
+                    results_per_page: None,
+                    has_next_page: None,
+                }),
+            );
+        }
+    };
+
     // Removed: We no longer cleanup existing blobs in that user folder to prevent breaking user favorites.
     // The ON CONFLICT DO UPDATE handles database logical cleanup and override.
 
-    match state.seventv.fetch_user_emotes(&payload.user_id, limit).await {
+    match state.seventv.fetch_user_emotes(&user_id, limit).await {
         Ok(emotes) => {
             let processed = state.seventv.process_emotes_batch(emotes, &folder).await;
             
@@ -595,9 +644,10 @@ async fn sync_user_emotes_handler(
 
             if let Err(e) = persist_user_emotes(
                 &state.db,
-                &payload.user_id,
+                &user_id,
                 &folder,
                 &user_display_name,
+                image_url.as_deref(),
                 &processed,
             )
             .await
@@ -660,8 +710,33 @@ async fn sync_user_emotes_handler(
 async fn get_saved_user_emotes_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<crate::models::SavedUserEmotesQuery>,
-) -> Json<SearchResponse> {
+) -> Json<SavedUserEmotesResponse> {
     let limit = params.limit.unwrap_or(100) as i64;
+
+    let user = match sqlx::query_as::<_, SavedUserInfo>(
+        "SELECT seven_tv_id, folder_name, display_name, image_url FROM users WHERE folder_name = $1"
+    )
+    .bind(&params.folder_name)
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(user) => user,
+        Err(e) => {
+            tracing::error!("Failed to fetch user metadata from DB: {:?}", e);
+            return Json(SavedUserEmotesResponse {
+                success: false,
+                total_found: 0,
+                emotes: vec![],
+                user: None,
+                message: Some(format!("Database error: {}", e)),
+                cached: Some(false),
+                page: None,
+                total_pages: None,
+                results_per_page: None,
+                has_next_page: None,
+            });
+        }
+    };
     
     // Query stickers from database
     let rows = sqlx::query_as::<_, StickerRow>(
@@ -686,13 +761,13 @@ async fn get_saved_user_emotes_handler(
                 mime: None, // Mime can be inferred or added to DB
             }).collect();
 
-            Json(SearchResponse {
+            Json(SavedUserEmotesResponse {
                 success: true,
                 total_found: emotes.len() as i32,
                 emotes,
+                user,
                 message: None,
                 cached: Some(false),
-                processing_time: None,
                 page: Some(1),
                 total_pages: Some(1),
                 results_per_page: Some(limit as i32),
@@ -700,13 +775,13 @@ async fn get_saved_user_emotes_handler(
             })
         },
         Ok(_) => {
-            Json(SearchResponse {
+            Json(SavedUserEmotesResponse {
                 success: false,
                 total_found: 0,
                 emotes: vec![],
+                user,
                 message: Some("No saved emotes found for this folder name".to_string()),
                 cached: Some(false),
-                processing_time: None,
                 page: None,
                 total_pages: None,
                 results_per_page: None,
@@ -715,13 +790,13 @@ async fn get_saved_user_emotes_handler(
         },
         Err(e) => {
             tracing::error!("Failed to fetch stickers from DB: {:?}", e);
-            Json(SearchResponse {
+            Json(SavedUserEmotesResponse {
                 success: false,
                 total_found: 0,
                 emotes: vec![],
+                user,
                 message: Some(format!("Database error: {}", e)),
                 cached: Some(false),
-                processing_time: None,
                 page: None,
                 total_pages: None,
                 results_per_page: None,
@@ -729,6 +804,37 @@ async fn get_saved_user_emotes_handler(
             })
         }
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedUserEmotesResponse {
+    success: bool,
+    total_found: i32,
+    emotes: Vec<EmoteResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user: Option<SavedUserInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cached: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    page: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_pages: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    results_per_page: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    has_next_page: Option<bool>,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+struct SavedUserInfo {
+    seven_tv_id: String,
+    folder_name: String,
+    display_name: String,
+    image_url: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -749,6 +855,7 @@ struct UserRecord {
     seven_tv_id: String,
     folder_name: String,
     display_name: String,
+    image_url: Option<String>,
     last_synced_at: Option<chrono::DateTime<chrono::Utc>>,
     emote_count: Option<i32>,
 }
@@ -773,7 +880,7 @@ async fn list_users_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<UsersListResponse> {
     let rows = sqlx::query_as::<_, UserRecord>(
-        "SELECT id, seven_tv_id, folder_name, display_name, last_synced_at, emote_count FROM users ORDER BY last_synced_at DESC"
+        "SELECT id, seven_tv_id, folder_name, display_name, image_url, last_synced_at, emote_count FROM users ORDER BY last_synced_at DESC"
     )
     .fetch_all(&state.db)
     .await;
