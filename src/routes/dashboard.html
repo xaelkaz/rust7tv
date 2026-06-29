@@ -451,14 +451,49 @@
                 syncBtn.className = 'btn bg-purple-600 hover:bg-purple-500 text-white px-3 py-1 rounded text-xs';
                 syncBtn.textContent = 'Sync';
                 syncBtn.addEventListener('click', () => resyncUser(u.folderName, u.sevenTvId, u.imageUrl));
+                const imageBtn = document.createElement('button');
+                imageBtn.className = 'btn bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 rounded text-xs';
+                imageBtn.textContent = 'Image';
+                imageBtn.addEventListener('click', () => editUserImage(u.folderName, u.displayName, u.imageUrl));
                 const delBtn = document.createElement('button');
                 delBtn.className = 'btn bg-red-600/20 hover:bg-red-600 hover:text-white text-red-400 border border-red-600/40 px-3 py-1 rounded text-xs';
                 delBtn.textContent = 'Delete';
                 delBtn.addEventListener('click', () => askDeleteUser(u.folderName, u.displayName));
-                actions.append(syncBtn, delBtn);
+                actions.append(syncBtn, imageBtn, delBtn);
 
                 row.append(left, actions);
                 list.appendChild(row);
+            }
+        }
+
+        async function editUserImage(folderName, displayName, currentImageUrl) {
+            const label = displayName || folderName;
+            const nextImageUrl = window.prompt(`Image URL for ${label}. Leave empty to clear it.`, currentImageUrl || '');
+            if (nextImageUrl === null) return;
+
+            const imageUrl = nextImageUrl.trim();
+            if (!isValidImageUrl(imageUrl)) {
+                log('Image URL must start with http:// or https://', 'error');
+                return;
+            }
+
+            log(`Updating image URL for <b>${folderName}</b>...`, 'loading');
+            try {
+                const response = await fetch('/api/admin/users/' + encodeURIComponent(folderName) + '/image', {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ imageUrl: imageUrl || null })
+                });
+                const data = await response.json();
+                if (response.ok && data.success) {
+                    log(`Image URL updated for <b>${folderName}</b>`, 'success');
+                    usersLoaded = false;
+                    loadUsersList();
+                } else {
+                    log(`Image update failed: ${data.message || 'Unknown error'}`, 'error');
+                }
+            } catch (err) {
+                log(`Network Error: ${err.message}`, 'error');
             }
         }
 
