@@ -98,6 +98,12 @@ pub struct SyncUserEmotesRequest {
     pub image_url: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateUserImageRequest {
+    pub image_url: Option<String>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedUserEmotesQuery {

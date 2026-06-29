@@ -1,5 +1,5 @@
 use axum::{
-    routing::{get, post, delete},
+    routing::{get, post, delete, patch},
     Router,
     Json,
     middleware,
@@ -9,7 +9,7 @@ use axum::{
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use crate::AppState;
-use crate::models::{TrendingPeriod, SearchResponse, SyncTrendingRequest, SyncUserEmotesRequest, EmoteResponse, TrendingTagResponse, TrendingTag};
+use crate::models::{TrendingPeriod, SearchResponse, SyncTrendingRequest, SyncUserEmotesRequest, UpdateUserImageRequest, EmoteResponse, TrendingTagResponse, TrendingTag};
 use serde::{Deserialize, Serialize};
 
 mod auth;
@@ -31,6 +31,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/admin/dashboard", get(dashboard::dashboard_handler))
         .route("/api/admin/sync-trending", post(sync_trending_handler))
         .route("/api/admin/sync-user-emotes", post(sync_user_emotes_handler))
+        .route("/api/admin/users/:folder_name/image", patch(update_user_image_handler))
         .route("/api/admin/users/:folder_name", delete(delete_user_handler))
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&state),
@@ -876,6 +877,16 @@ struct DeleteResponse {
     message: Option<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateUserImageResponse {
+    success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user: Option<SavedUserInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
 async fn list_users_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<UsersListResponse> {
@@ -896,6 +907,77 @@ async fn list_users_handler(
                 success: false,
                 users: vec![],
             })
+        }
+    }
+}
+
+async fn update_user_image_handler(
+    State(state): State<Arc<AppState>>,
+    Path(folder_name): Path<String>,
+    Json(payload): Json<UpdateUserImageRequest>,
+) -> (StatusCode, Json<UpdateUserImageResponse>) {
+    if !valid_folder_name(&folder_name) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(UpdateUserImageResponse {
+                success: false,
+                user: None,
+                message: Some(
+                    "Invalid folder_name: must be 1-64 chars of [A-Za-z0-9_-]".to_string(),
+                ),
+            }),
+        );
+    }
+
+    let image_url = match normalize_image_url(payload.image_url) {
+        Ok(image_url) => image_url,
+        Err(message) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(UpdateUserImageResponse {
+                    success: false,
+                    user: None,
+                    message: Some(message.to_string()),
+                }),
+            );
+        }
+    };
+
+    let updated = sqlx::query_as::<_, SavedUserInfo>(
+        "UPDATE users SET image_url = $1 WHERE folder_name = $2 RETURNING seven_tv_id, folder_name, display_name, image_url"
+    )
+    .bind(image_url.as_deref())
+    .bind(&folder_name)
+    .fetch_optional(&state.db)
+    .await;
+
+    match updated {
+        Ok(Some(user)) => (
+            StatusCode::OK,
+            Json(UpdateUserImageResponse {
+                success: true,
+                user: Some(user),
+                message: Some("User image URL updated".to_string()),
+            }),
+        ),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(UpdateUserImageResponse {
+                success: false,
+                user: None,
+                message: Some("User not found".to_string()),
+            }),
+        ),
+        Err(e) => {
+            tracing::error!("Failed to update image URL for {}: {:?}", folder_name, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(UpdateUserImageResponse {
+                    success: false,
+                    user: None,
+                    message: Some(format!("Database error: {}", e)),
+                }),
+            )
         }
     }
 }
