@@ -17,8 +17,14 @@ impl CacheService {
         Self { client }
     }
 
-    pub fn get_cache_key(query: &str, limit: i32, animated_only: bool) -> String {
-        format!("emote_search:{}:{}:{}", query, limit, animated_only)
+    pub fn get_cache_key(query: &str, page: i32, limit: i32, animated_only: bool) -> String {
+        format!(
+            "emote_search:v2:{}:{}:{}:{}",
+            query.trim().to_lowercase(),
+            page,
+            limit,
+            animated_only
+        )
     }
 
     pub fn get_trending_cache_key(period: &str, limit: i32, page: i32, animated_only: bool) -> String {
@@ -53,5 +59,18 @@ impl CacheService {
             conn.del::<_, ()>(keys).await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CacheService;
+
+    #[test]
+    fn search_cache_key_is_versioned_normalized_and_page_specific() {
+        assert_eq!(
+            CacheService::get_cache_key("  GIGACHAD  ", 2, 30, true),
+            "emote_search:v2:gigachad:2:30:true"
+        );
     }
 }

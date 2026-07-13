@@ -387,6 +387,8 @@ impl SevenTVService {
                 };
 
                 let best_image = select_best_image(&images)?;
+                let animated_preview_url = select_animated_preview(&images).map(normalize_url);
+                let poster_url = select_poster(&images).map(normalize_url);
 
                 let extension = match best_image.mime.as_str() {
                     "image/webp" => ".webp",
@@ -410,6 +412,8 @@ impl SevenTVService {
                 Some(EmoteResponse {
                     file_name,
                     url,
+                    animated_preview_url,
+                    poster_url,
                     emote_id: e.id,
                     emote_name: name.to_string(),
                     owner: e.owner.and_then(|o| o.main_connection.map(|c| c.platform_display_name)),
@@ -482,6 +486,8 @@ async fn process_single_emote(
     Some(EmoteResponse {
         file_name,
         url,
+        animated_preview_url: None,
+        poster_url: None,
         emote_id: e.id,
         emote_name: name.to_string(),
         owner: e.owner.and_then(|o| o.main_connection.map(|c| c.platform_display_name)),
@@ -517,4 +523,135 @@ fn select_best_image(images: &[Image]) -> Option<&Image> {
         
         a.scale.cmp(&b.scale)
     })
+}
+
+fn select_animated_preview(images: &[Image]) -> Option<&Image> {
+    let animated_webp = images
+        .iter()
+        .filter(|image| image.mime == "image/webp" && image.frame_count > 1);
+
+    animated_webp
+        .clone()
+        .find(|image| image.scale == 2)
+        .or_else(|| {
+            animated_webp.min_by(|a, b| {
+                let a_distance = (a.scale - 2).abs();
+                let b_distance = (b.scale - 2).abs();
+                a_distance
+                    .cmp(&b_distance)
+                    .then_with(|| b.scale.cmp(&a.scale))
+            })
+        })
+}
+
+fn select_poster(images: &[Image]) -> Option<&Image> {
+    images
+        .iter()
+        .filter(|image| image.mime == "image/webp" && image.frame_count == 1)
+        .max_by_key(|image| image.scale)
+}
+
+fn normalize_url(image: &Image) -> String {
+    if image.url.starts_with("//") {
+        format!("https:{}", image.url)
+    } else {
+        image.url.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{select_animated_preview, select_best_image, select_poster, Image};
+    use crate::config::Config;
+    use crate::services::storage::StorageService;
+    use std::sync::Arc;
+
+    fn image(name: &str, scale: i32, frame_count: i32) -> Image {
+        Image {
+            url: format!("https://cdn.7tv.app/{name}"),
+            mime: "image/webp".to_string(),
+            size: 1,
+            scale,
+            width: scale * 32,
+            frame_count,
+        }
+    }
+
+    #[test]
+    fn selects_distinct_source_preview_and_poster_variants() {
+        let images = vec![
+            image("1x.webp", 1, 198),
+            image("2x.webp", 2, 198),
+            image("4x.webp", 4, 198),
+            image("2x_static.webp", 2, 1),
+            image("4x_static.webp", 4, 1),
+        ];
+
+        assert_eq!(
+            select_best_image(&images).unwrap().url,
+            "https://cdn.7tv.app/4x.webp"
+        );
+        assert_eq!(
+            select_animated_preview(&images).unwrap().url,
+            "https://cdn.7tv.app/2x.webp"
+        );
+        assert_eq!(
+            select_poster(&images).unwrap().url,
+            "https://cdn.7tv.app/4x_static.webp"
+        );
+    }
+
+    #[test]
+    fn static_emote_has_no_animated_preview() {
+        let images = vec![
+            image("2x_static.webp", 2, 1),
+            image("4x_static.webp", 4, 1),
+        ];
+
+        assert!(select_animated_preview(&images).is_none());
+        assert_eq!(
+            select_poster(&images).unwrap().url,
+            "https://cdn.7tv.app/4x_static.webp"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the live 7TV API"]
+    async fn live_search_serializes_source_preview_and_poster() {
+        let config = Config {
+            port: "0".to_string(),
+            redis_host: String::new(),
+            redis_port: String::new(),
+            redis_password: String::new(),
+            redis_db: 0,
+            redis_url: String::new(),
+            azure_conn_str: String::new(),
+            container_name: "unused".to_string(),
+            cache_ttl: 0,
+            trending_cache_ttl: 0,
+            api_title: String::new(),
+            api_description: String::new(),
+            api_version: String::new(),
+            database_url: String::new(),
+            admin_token: String::new(),
+            admin_user: String::new(),
+            admin_password: String::new(),
+        };
+        let service = super::SevenTVService::new(Arc::new(StorageService::new(&config)));
+
+        let emotes = service.search_emotes("GIGACHAD", 1, 1, true).await.unwrap();
+        let response = service.process_emotes_batch_no_storage(emotes);
+        let first = response.first().unwrap();
+
+        assert!(first.url.ends_with("/4x.webp"));
+        assert!(first
+            .animated_preview_url
+            .as_deref()
+            .is_some_and(|url| url.ends_with("/2x.webp")));
+        assert!(first
+            .poster_url
+            .as_deref()
+            .is_some_and(|url| url.ends_with("/4x_static.webp")));
+        println!("{}", serde_json::to_string_pretty(first).unwrap());
+    }
 }

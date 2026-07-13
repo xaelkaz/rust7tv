@@ -201,7 +201,12 @@ async fn search_emotes_handler(
     let animated_only = payload.animated_only.unwrap_or(false);
     
     // Check cache
-    let cache_key = crate::services::cache::CacheService::get_cache_key(&payload.query, limit, animated_only);
+    let cache_key = crate::services::cache::CacheService::get_cache_key(
+        &payload.query,
+        page,
+        limit,
+        animated_only,
+    );
     if let Some(cached_data) = state.cache.get_from_cache(&cache_key).await {
         if let Ok(mut response) = serde_json::from_slice::<SearchResponse>(&cached_data) {
             response.cached = Some(true);
@@ -502,6 +507,8 @@ async fn synced_trending_emotes_handler(
                 emote_name: s.emote_name,
                 file_name: s.file_name,
                 url: s.url,
+                animated_preview_url: None,
+                poster_url: None,
                 owner: s.owner_name,
                 tags: s.tags,
                 animated: Some(s.animated),
@@ -755,6 +762,8 @@ async fn get_saved_user_emotes_handler(
                 emote_name: s.emote_name,
                 file_name: s.file_name,
                 url: s.url,
+                animated_preview_url: None,
+                poster_url: None,
                 owner: s.owner_name,
                 tags: s.tags,
                 animated: Some(s.animated),

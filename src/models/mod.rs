@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 pub struct EmoteResponse {
     pub file_name: String,
     pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub animated_preview_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub poster_url: Option<String>,
     pub emote_id: String,
     pub emote_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -109,4 +113,38 @@ pub struct UpdateUserImageRequest {
 pub struct SavedUserEmotesQuery {
     pub folder_name: String,
     pub limit: Option<i32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EmoteResponse;
+
+    #[test]
+    fn emote_response_serializes_optional_search_urls_as_camel_case() {
+        let response = EmoteResponse {
+            file_name: "GIGACHAD_id.webp".to_string(),
+            url: "https://cdn.7tv.app/emote/id/4x.webp".to_string(),
+            animated_preview_url: Some("https://cdn.7tv.app/emote/id/2x.webp".to_string()),
+            poster_url: Some("https://cdn.7tv.app/emote/id/4x_static.webp".to_string()),
+            emote_id: "id".to_string(),
+            emote_name: "GIGACHAD".to_string(),
+            owner: None,
+            animated: Some(true),
+            scale: Some(4),
+            mime: Some("image/webp".to_string()),
+            tags: Some(vec![]),
+        };
+
+        let json = serde_json::to_value(response).unwrap();
+
+        assert_eq!(json["url"], "https://cdn.7tv.app/emote/id/4x.webp");
+        assert_eq!(
+            json["animatedPreviewUrl"],
+            "https://cdn.7tv.app/emote/id/2x.webp"
+        );
+        assert_eq!(
+            json["posterUrl"],
+            "https://cdn.7tv.app/emote/id/4x_static.webp"
+        );
+    }
 }
