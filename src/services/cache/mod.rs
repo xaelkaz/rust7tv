@@ -52,6 +52,20 @@ impl CacheService {
         Ok(())
     }
 
+    /// Increments a counter, starting its TTL window on the first hit. Returns the new value.
+    pub async fn increment_with_ttl(
+        &self,
+        key: &str,
+        ttl_seconds: i64,
+    ) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
+        let mut conn = self.client.get_multiplexed_tokio_connection().await?;
+        let count: i64 = conn.incr(key, 1).await?;
+        if count == 1 {
+            conn.expire::<_, ()>(key, ttl_seconds).await?;
+        }
+        Ok(count)
+    }
+
     pub async fn clear_cache(&self, pattern: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut conn = self.client.get_multiplexed_tokio_connection().await?;
         let keys: Vec<String> = conn.keys(pattern).await?;
