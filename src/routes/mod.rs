@@ -13,6 +13,7 @@ use crate::models::{TrendingPeriod, SearchResponse, SyncTrendingRequest, SyncUse
 use serde::{Deserialize, Serialize};
 
 mod auth;
+mod creator_requests;
 mod dashboard;
 
 pub fn create_router(state: Arc<AppState>) -> Router {
@@ -25,7 +26,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/trending/synced", get(synced_trending_emotes_handler))
         .route("/api/user/emotes/saved", get(get_saved_user_emotes_handler))
         .route("/api/users", get(list_users_handler))
-        .route("/api/admin/users", get(list_users_handler));
+        .route("/api/admin/users", get(list_users_handler))
+        .route(
+            "/api/creator-requests",
+            post(creator_requests::create_creator_request_handler),
+        );
 
     let admin = Router::new()
         .route("/admin/dashboard", get(dashboard::dashboard_handler))
@@ -33,6 +38,14 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/admin/sync-user-emotes", post(sync_user_emotes_handler))
         .route("/api/admin/users/:folder_name/image", patch(update_user_image_handler))
         .route("/api/admin/users/:folder_name", delete(delete_user_handler))
+        .route(
+            "/api/admin/creator-requests",
+            get(creator_requests::list_creator_requests_handler),
+        )
+        .route(
+            "/api/admin/creator-requests/:id",
+            patch(creator_requests::update_creator_request_handler),
+        )
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth::require_admin,
@@ -677,6 +690,8 @@ async fn sync_user_emotes_handler(
                     }),
                 );
             }
+
+            creator_requests::approve_matching_request(&state.db, &folder).await;
 
             (
                 StatusCode::OK,
