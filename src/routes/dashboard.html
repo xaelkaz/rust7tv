@@ -73,6 +73,12 @@
                 class="pb-2 text-sm font-medium border-b-2 border-transparent text-gray-400 hover:text-gray-300 transition-colors">
                 User Sync
             </button>
+            <button onclick="switchTab('requests')" id="btn-requests"
+                class="pb-2 text-sm font-medium border-b-2 border-transparent text-gray-400 hover:text-gray-300 transition-colors">
+                Requests
+                <span id="requestsBadge"
+                    class="hidden ml-1 px-1.5 py-0.5 rounded-full bg-purple-600 text-white text-[10px]">0</span>
+            </button>
         </div>
 
         <!-- Sync Content Area -->
@@ -197,6 +203,36 @@
                 </div>
             </div>
 
+            <!-- CONTENIDO TAB 3: Creator Requests -->
+            <div id="tab-requests" class="hidden">
+                <div class="card rounded-xl p-6 shadow-xl h-full flex flex-col">
+                    <div class="flex justify-between items-center mb-2">
+                        <h2 class="text-xl font-semibold flex items-center gap-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
+                                stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                                class="text-purple-400">
+                                <polyline points="22 12 16 12 14 15 10 15 8 12 2 12" />
+                                <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+                            </svg>
+                            Creator Requests
+                        </h2>
+                        <select id="requestsStatus" onchange="loadCreatorRequests()"
+                            class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1 text-white text-sm focus:outline-none focus:border-blue-500">
+                            <option value="pending">Pending</option>
+                            <option value="approved">Approved</option>
+                            <option value="rejected">Rejected</option>
+                        </select>
+                    </div>
+                    <p class="text-xs text-gray-500 mb-4">
+                        Streamers requested from the app, sorted by number of devices asking.
+                        "Add" fills the User Sync form; syncing that folder approves the request automatically.
+                    </p>
+                    <div id="requestsList" class="space-y-2 max-h-96 overflow-y-auto pr-1">
+                        <div class="text-gray-500 text-sm text-center py-6">Loading requests...</div>
+                    </div>
+                </div>
+            </div>
+
         </div>
 
         <!-- Console / Status -->
@@ -306,34 +342,22 @@
         let pendingDeleteFolder = null;
         let usersLoaded = false;
 
+        const TABS = ['trending', 'users', 'requests'];
+
         // Tab Switching Logic
         function switchTab(tabName) {
-            // Update Buttons
-            const btnTrending = document.getElementById('btn-trending');
-            const btnUsers = document.getElementById('btn-users');
+            for (const name of TABS) {
+                const btn = document.getElementById('btn-' + name);
+                const tab = document.getElementById('tab-' + name);
+                const active = name === tabName;
 
-            // Remove active classes
-            [btnTrending, btnUsers].forEach(btn => {
-                btn.classList.remove('border-blue-500', 'text-blue-400');
-                btn.classList.add('border-transparent', 'text-gray-400');
-            });
-
-            // Add active class to clicked
-            const activeBtn = tabName === 'trending' ? btnTrending : btnUsers;
-            activeBtn.classList.remove('border-transparent', 'text-gray-400');
-            activeBtn.classList.add('border-blue-500', 'text-blue-400');
-
-            // Toggle Content Visibility
-            const tabTrending = document.getElementById('tab-trending');
-            const tabUsers = document.getElementById('tab-users');
-
-            if (tabName === 'trending') {
-                tabTrending.classList.remove('hidden');
-                tabUsers.classList.add('hidden');
-            } else {
-                tabUsers.classList.remove('hidden');
-                tabTrending.classList.add('hidden');
+                btn.classList.toggle('border-blue-500', active);
+                btn.classList.toggle('text-blue-400', active);
+                btn.classList.toggle('border-transparent', !active);
+                btn.classList.toggle('text-gray-400', !active);
+                tab.classList.toggle('hidden', !active);
             }
+            if (tabName === 'requests') loadCreatorRequests();
         }
 
         // Sub-tab switching inside User Sync
@@ -523,6 +547,151 @@
             }
         }
 
+        function setRequestsMessage(text, className) {
+            const list = document.getElementById('requestsList');
+            list.replaceChildren();
+            const message = document.createElement('div');
+            message.className = className;
+            message.textContent = text;
+            list.appendChild(message);
+        }
+
+        async function loadCreatorRequests() {
+            const status = document.getElementById('requestsStatus').value;
+            setRequestsMessage('Loading requests...', 'text-gray-500 text-sm text-center py-6');
+            try {
+                const response = await fetch('/api/admin/creator-requests?status=' + encodeURIComponent(status));
+                const data = await response.json();
+                if (!response.ok || !data.success) {
+                    setRequestsMessage('Failed to load requests: ' + (data.message || response.status), 'text-red-400 text-sm text-center py-6');
+                    return;
+                }
+                const requests = data.requests || [];
+                if (status === 'pending') updateRequestsBadge(requests.length);
+                renderCreatorRequests(requests, status);
+            } catch (err) {
+                setRequestsMessage('Failed to load requests: ' + err.message, 'text-red-400 text-sm text-center py-6');
+            }
+        }
+
+        async function refreshRequestsBadge() {
+            try {
+                const response = await fetch('/api/admin/creator-requests?status=pending');
+                const data = await response.json();
+                if (response.ok && data.success) updateRequestsBadge((data.requests || []).length);
+            } catch {
+                // The badge is a convenience; the Requests tab reports load errors.
+            }
+        }
+
+        function updateRequestsBadge(count) {
+            const badge = document.getElementById('requestsBadge');
+            badge.textContent = count > 99 ? '99+' : String(count);
+            badge.classList.toggle('hidden', count === 0);
+        }
+
+        // Safe DOM construction, like renderUsersList: values come from app users.
+        function renderCreatorRequests(requests, status) {
+            const list = document.getElementById('requestsList');
+            list.replaceChildren();
+            if (requests.length === 0) {
+                setRequestsMessage(`No ${status} requests.`, 'text-gray-500 text-sm text-center py-6');
+                return;
+            }
+            for (const r of requests) {
+                const row = document.createElement('div');
+                row.className = 'flex items-center justify-between gap-3 p-3 bg-gray-900/50 rounded-lg border border-gray-800 hover:border-purple-500/40 transition-colors';
+
+                const meta = document.createElement('div');
+                meta.className = 'min-w-0';
+
+                const topLine = document.createElement('div');
+                topLine.className = 'flex items-center gap-2';
+                const name = document.createElement('a');
+                name.className = 'text-white text-sm font-medium truncate hover:text-purple-300';
+                name.href = 'https://www.twitch.tv/' + encodeURIComponent(r.channelName);
+                name.target = '_blank';
+                name.rel = 'noopener noreferrer';
+                name.textContent = r.channelName;
+                const votes = document.createElement('span');
+                votes.className = 'px-2 py-0.5 rounded bg-purple-500/10 text-purple-300 text-[10px] border border-purple-500/20';
+                votes.textContent = `${r.requestCount} ${r.requestCount === 1 ? 'request' : 'requests'}`;
+                topLine.append(name, votes);
+
+                const subline = document.createElement('div');
+                subline.className = 'text-xs text-gray-500 truncate';
+                const sevenTv = r.sevenTvUserId ? `7TV ${r.sevenTvUserId.substring(0, 12)}...` : 'no 7TV link';
+                subline.textContent = `last asked ${formatRelative(r.lastRequestedAt)} · first ${formatRelative(r.createdAt)} · ${sevenTv}`;
+
+                meta.append(topLine, subline);
+
+                const actions = document.createElement('div');
+                actions.className = 'flex gap-2 flex-shrink-0';
+                if (r.sevenTvUserId) {
+                    const profile = document.createElement('a');
+                    profile.className = 'btn bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 rounded text-xs';
+                    profile.href = 'https://7tv.app/users/' + encodeURIComponent(r.sevenTvUserId);
+                    profile.target = '_blank';
+                    profile.rel = 'noopener noreferrer';
+                    profile.textContent = '7TV';
+                    actions.appendChild(profile);
+                }
+                if (status === 'pending') {
+                    const addBtn = document.createElement('button');
+                    addBtn.className = 'btn bg-purple-600 hover:bg-purple-500 text-white px-3 py-1 rounded text-xs';
+                    addBtn.textContent = 'Add';
+                    addBtn.addEventListener('click', () => addFromRequest(r));
+                    const rejectBtn = document.createElement('button');
+                    rejectBtn.className = 'btn bg-red-600/20 hover:bg-red-600 hover:text-white text-red-400 border border-red-600/40 px-3 py-1 rounded text-xs';
+                    rejectBtn.textContent = 'Reject';
+                    rejectBtn.addEventListener('click', () => updateCreatorRequest(r, 'rejected'));
+                    actions.append(addBtn, rejectBtn);
+                } else if (status === 'rejected') {
+                    const reopenBtn = document.createElement('button');
+                    reopenBtn.className = 'btn bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 rounded text-xs';
+                    reopenBtn.textContent = 'Reopen';
+                    reopenBtn.addEventListener('click', () => updateCreatorRequest(r, 'pending'));
+                    actions.appendChild(reopenBtn);
+                }
+
+                row.append(meta, actions);
+                list.appendChild(row);
+            }
+        }
+
+        function addFromRequest(request) {
+            switchTab('users');
+            switchUserSubTab('add');
+            const userIdInput = document.getElementById('userIdInput');
+            userIdInput.value = request.sevenTvUserId || '';
+            document.getElementById('folderNameInput').value = request.channelName;
+            document.getElementById('userImageUrlInput').value = '';
+            if (!request.sevenTvUserId) {
+                log(`Find the 7TV user ID for <b>${request.channelName}</b> to sync it.`, 'info');
+                userIdInput.focus();
+            }
+        }
+
+        async function updateCreatorRequest(request, status) {
+            try {
+                const response = await fetch('/api/admin/creator-requests/' + request.id, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ status })
+                });
+                const data = await response.json();
+                if (response.ok && data.success) {
+                    log(`Request for <b>${request.channelName}</b> marked as ${status}`, 'success');
+                    loadCreatorRequests();
+                    refreshRequestsBadge();
+                } else {
+                    log(`Request update failed: ${data.message || 'Unknown error'}`, 'error');
+                }
+            } catch (err) {
+                log(`Network Error: ${err.message}`, 'error');
+            }
+        }
+
         async function resyncUser(folderName, userId, imageUrl) {
             const startTime = Date.now();
             log(`Re-syncing <b>${folderName}</b>...`, 'loading');
@@ -694,6 +863,8 @@
                     document.getElementById('userImageUrlInput').value = '';
                     usersLoaded = false;
                     loadUsersList();
+                    // Syncing approves a matching request server side.
+                    refreshRequestsBadge();
                 } else {
                     log(`❌ User Sync Failed: ${data.message || 'Unknown error'}`, 'error');
                 }
@@ -741,6 +912,7 @@
         // Init
         document.addEventListener('DOMContentLoaded', () => {
             loadPreview();
+            refreshRequestsBadge();
         });
     </script>
 </body>
