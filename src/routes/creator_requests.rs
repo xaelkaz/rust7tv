@@ -3,7 +3,8 @@
 //! Users submit a Twitch channel (plus an optional 7TV link). Requests are
 //! deduplicated by channel and counted once per app install, so the dashboard
 //! can sort by demand. Syncing a user whose folder matches a pending request
-//! approves it (see `approve_matching_request`).
+//! approves it (see `approve_matching_request`). Each install can read back the
+//! status of its own requests through `/api/creator-requests/mine`.
 
 use axum::{
     extract::{Path, Query, State},
@@ -73,6 +74,27 @@ pub struct CreatorRequestRecord {
 pub struct CreatorRequestsListResponse {
     pub success: bool,
     pub requests: Vec<CreatorRequestRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MyCreatorRequestsQuery {
+    pub device_id: String,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct MyCreatorRequestRecord {
+    pub channel_name: String,
+    pub status: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MyCreatorRequestsResponse {
+    pub success: bool,
+    pub requests: Vec<MyCreatorRequestRecord>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
@@ -305,6 +327,65 @@ async fn record_request(
         folder_name: None,
         message: None,
     })
+}
+
+/// Status of the requests a device voted for, so the app can show approved / rejected ones.
+/// The device id is the random per-install UUID the app already sends with each request.
+///
+/// A vote cast after a rejection hasn't been reviewed yet, so that device sees the request as
+/// pending; rejecting it again (which moves `resolved_at`) makes it rejected for everyone.
+pub async fn my_creator_requests_handler(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<MyCreatorRequestsQuery>,
+) -> (StatusCode, Json<MyCreatorRequestsResponse>) {
+    if !valid_device_id(&params.device_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(MyCreatorRequestsResponse {
+                success: false,
+                requests: vec![],
+                message: Some("Invalid device id".to_string()),
+            }),
+        );
+    }
+
+    let rows = sqlx::query_as::<_, MyCreatorRequestRecord>(
+        "SELECT r.channel_name,
+                CASE
+                    WHEN r.status = 'rejected' AND v.created_at > r.resolved_at THEN 'pending'
+                    ELSE r.status
+                END AS status
+         FROM creator_requests r
+         JOIN creator_request_votes v ON v.request_id = r.id
+         WHERE v.device_id = $1
+         ORDER BY v.created_at DESC
+         LIMIT 100",
+    )
+    .bind(&params.device_id)
+    .fetch_all(&state.db)
+    .await;
+
+    match rows {
+        Ok(requests) => (
+            StatusCode::OK,
+            Json(MyCreatorRequestsResponse {
+                success: true,
+                requests,
+                message: None,
+            }),
+        ),
+        Err(e) => {
+            tracing::error!("Failed to load creator requests for a device: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(MyCreatorRequestsResponse {
+                    success: false,
+                    requests: vec![],
+                    message: Some("Database error".to_string()),
+                }),
+            )
+        }
+    }
 }
 
 pub async fn list_creator_requests_handler(

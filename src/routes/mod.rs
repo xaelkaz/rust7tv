@@ -30,6 +30,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/creator-requests",
             post(creator_requests::create_creator_request_handler),
+        )
+        .route(
+            "/api/creator-requests/mine",
+            get(creator_requests::my_creator_requests_handler),
         );
 
     let admin = Router::new()
