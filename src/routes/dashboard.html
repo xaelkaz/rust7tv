@@ -229,7 +229,9 @@
                     </div>
                     <p class="text-xs text-gray-500 mb-4">
                         Streamers requested from the app, sorted by number of devices asking.
-                        "Add" fills the User Sync form; syncing that folder approves the request automatically.
+                        "Set up sync" fills the User Sync form; a successful sync approves the request automatically.
+                        Use "Approve" when the creator is already in the app (e.g. under another folder name).
+                        Approved and rejected requests disappear from the requester's app.
                     </p>
                     <div id="requestsList" class="space-y-2 max-h-96 overflow-y-auto pr-1">
                         <div class="text-gray-500 text-sm text-center py-6">Loading requests...</div>
@@ -1036,10 +1038,11 @@
             }
             for (const r of requests) {
                 const row = document.createElement('div');
-                row.className = 'flex items-center justify-between gap-3 p-3 bg-gray-900/50 rounded-lg border border-gray-800 hover:border-purple-500/40 transition-colors';
+                // Wraps so the channel name stays readable when the action buttons don't fit beside it.
+                row.className = 'flex flex-wrap items-center justify-between gap-3 p-3 bg-gray-900/50 rounded-lg border border-gray-800 hover:border-purple-500/40 transition-colors';
 
                 const meta = document.createElement('div');
-                meta.className = 'min-w-0';
+                meta.className = 'min-w-0 flex-1 basis-40';
 
                 const topLine = document.createElement('div');
                 topLine.className = 'flex items-center gap-2';
@@ -1073,16 +1076,22 @@
                     actions.appendChild(profile);
                 }
                 if (status === 'pending') {
-                    const addBtn = document.createElement('button');
-                    addBtn.className = 'btn bg-purple-600 hover:bg-purple-500 text-white px-3 py-1 rounded text-xs';
-                    addBtn.textContent = 'Add';
-                    addBtn.addEventListener('click', () => addFromRequest(r));
+                    const syncBtn = document.createElement('button');
+                    syncBtn.className = 'btn bg-purple-600 hover:bg-purple-500 text-white px-3 py-1 rounded text-xs';
+                    syncBtn.textContent = 'Set up sync';
+                    syncBtn.title = 'Fill the User Sync form for this channel';
+                    syncBtn.addEventListener('click', () => addFromRequest(r));
+                    const approveBtn = document.createElement('button');
+                    approveBtn.className = 'btn bg-green-600/20 hover:bg-green-600 hover:text-white text-green-400 border border-green-600/40 px-3 py-1 rounded text-xs';
+                    approveBtn.textContent = 'Approve';
+                    approveBtn.addEventListener('click', () => approveCreatorRequest(r));
                     const rejectBtn = document.createElement('button');
                     rejectBtn.className = 'btn bg-red-600/20 hover:bg-red-600 hover:text-white text-red-400 border border-red-600/40 px-3 py-1 rounded text-xs';
                     rejectBtn.textContent = 'Reject';
                     rejectBtn.addEventListener('click', () => updateCreatorRequest(r, 'rejected'));
-                    actions.append(addBtn, rejectBtn);
-                } else if (status === 'rejected') {
+                    actions.append(syncBtn, approveBtn, rejectBtn);
+                } else {
+                    // Approved or rejected: reopen undoes a mistaken decision.
                     const reopenBtn = document.createElement('button');
                     reopenBtn.className = 'btn bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 rounded text-xs';
                     reopenBtn.textContent = 'Reopen';
@@ -1106,6 +1115,15 @@
                 log(`Find the 7TV user ID for <b>${request.channelName}</b> to sync it.`, 'info');
                 userIdInput.focus();
             }
+        }
+
+        function approveCreatorRequest(request) {
+            // The requester's app announces "@channel is now in Creators!", so only approve once it's true.
+            const ok = window.confirm(
+                `Approve @${request.channelName}?\n\nDo this once the creator is in the app: ` +
+                `people who asked will be told they're now in Creators.`
+            );
+            if (ok) updateCreatorRequest(request, 'approved');
         }
 
         async function updateCreatorRequest(request, status) {
