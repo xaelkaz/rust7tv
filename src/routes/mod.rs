@@ -13,6 +13,7 @@ use crate::models::{TrendingPeriod, SearchResponse, SyncTrendingRequest, SyncUse
 use serde::{Deserialize, Serialize};
 
 mod auth;
+mod community_packs;
 mod creator_requests;
 mod dashboard;
 mod starter_packs;
@@ -36,7 +37,19 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/api/creator-requests/mine",
             get(creator_requests::my_creator_requests_handler),
         )
-        .route("/api/starter-packs", get(starter_packs::list_published_handler));
+        .route("/api/starter-packs", get(starter_packs::list_published_handler))
+        .route(
+            "/api/community-packs",
+            get(community_packs::list_approved_handler).post(community_packs::publish_handler),
+        )
+        .route(
+            "/api/community-packs/mine",
+            get(community_packs::my_packs_handler),
+        )
+        .route(
+            "/api/community-packs/:id/adds",
+            post(community_packs::record_add_handler),
+        );
 
     let admin = Router::new()
         .route("/admin/dashboard", get(dashboard::dashboard_handler))
@@ -63,6 +76,14 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/admin/starter-packs/:id",
             put(starter_packs::update_handler).delete(starter_packs::delete_handler),
+        )
+        .route(
+            "/api/admin/community-packs",
+            get(community_packs::admin_list_handler),
+        )
+        .route(
+            "/api/admin/community-packs/:id",
+            patch(community_packs::admin_update_handler).delete(community_packs::admin_delete_handler),
         )
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&state),

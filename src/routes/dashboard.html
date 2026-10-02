@@ -83,6 +83,12 @@
                 class="pb-2 text-sm font-medium border-b-2 border-transparent text-gray-400 hover:text-gray-300 transition-colors">
                 Starter Packs
             </button>
+            <button onclick="switchTab('community')" id="btn-community"
+                class="pb-2 text-sm font-medium border-b-2 border-transparent text-gray-400 hover:text-gray-300 transition-colors">
+                Community
+                <span id="communityBadge"
+                    class="hidden ml-1 px-1.5 py-0.5 rounded-full bg-purple-600 text-white text-[10px]">0</span>
+            </button>
         </div>
 
         <!-- Sync Content Area -->
@@ -235,6 +241,38 @@
                     </p>
                     <div id="requestsList" class="space-y-2 max-h-96 overflow-y-auto pr-1">
                         <div class="text-gray-500 text-sm text-center py-6">Loading requests...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- CONTENIDO TAB 5: Community Packs -->
+            <div id="tab-community" class="hidden">
+                <div class="card rounded-xl p-6 shadow-xl">
+                    <div class="flex justify-between items-center mb-2">
+                        <h2 class="text-xl font-semibold flex items-center gap-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
+                                stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                                class="text-purple-400">
+                                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                                <circle cx="9" cy="7" r="4" />
+                                <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+                                <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                            </svg>
+                            Community Packs
+                        </h2>
+                        <select id="communityStatus" onchange="loadCommunityPacks()"
+                            class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1 text-white text-sm focus:outline-none focus:border-blue-500">
+                            <option value="pending">Pending</option>
+                            <option value="approved">Approved</option>
+                            <option value="rejected">Rejected</option>
+                        </select>
+                    </div>
+                    <p class="text-xs text-gray-500 mb-4">
+                        Packs users published from the app. Approved packs show in the app's Explore tab, most added
+                        first. The author's app shows whether their pack is in review, published or not approved.
+                    </p>
+                    <div id="communityList" class="space-y-2">
+                        <div class="text-gray-500 text-sm text-center py-6">Loading community packs...</div>
                     </div>
                 </div>
             </div>
@@ -424,7 +462,7 @@
         let pendingDeleteFolder = null;
         let usersLoaded = false;
 
-        const TABS = ['trending', 'users', 'requests', 'starters'];
+        const TABS = ['trending', 'users', 'requests', 'starters', 'community'];
 
         // Tab Switching Logic
         function switchTab(tabName) {
@@ -441,6 +479,142 @@
             }
             if (tabName === 'requests') loadCreatorRequests();
             if (tabName === 'starters') loadStarterPacks();
+            if (tabName === 'community') loadCommunityPacks();
+        }
+
+        // ---------- Community packs ----------
+        // Names come from app users: build the DOM with textContent, and escape them in log().
+        function setCommunityMessage(text, className) {
+            const list = document.getElementById('communityList');
+            list.replaceChildren();
+            const message = document.createElement('div');
+            message.className = className;
+            message.textContent = text;
+            list.appendChild(message);
+        }
+
+        async function loadCommunityPacks() {
+            const status = document.getElementById('communityStatus').value;
+            setCommunityMessage('Loading community packs...', 'text-gray-500 text-sm text-center py-6');
+            try {
+                const response = await fetch('/api/admin/community-packs?status=' + encodeURIComponent(status));
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.message || response.status);
+                const packs = data.packs || [];
+                if (status === 'pending') updateCommunityBadge(packs.length);
+                renderCommunityPacks(packs, status);
+            } catch (err) {
+                setCommunityMessage('Failed to load community packs: ' + err.message, 'text-red-400 text-sm text-center py-6');
+            }
+        }
+
+        async function refreshCommunityBadge() {
+            try {
+                const response = await fetch('/api/admin/community-packs?status=pending');
+                const data = await response.json();
+                if (response.ok && data.success) updateCommunityBadge((data.packs || []).length);
+            } catch {
+                // The badge is a convenience; the Community tab reports load errors.
+            }
+        }
+
+        function updateCommunityBadge(count) {
+            const badge = document.getElementById('communityBadge');
+            badge.textContent = count > 99 ? '99+' : String(count);
+            badge.classList.toggle('hidden', count === 0);
+        }
+
+        function communityButton(label, className, onClick) {
+            const button = document.createElement('button');
+            button.className = `btn ${className} px-3 py-1 rounded text-xs`;
+            button.textContent = label;
+            button.addEventListener('click', onClick);
+            return button;
+        }
+
+        function renderCommunityPacks(packs, status) {
+            const list = document.getElementById('communityList');
+            list.replaceChildren();
+            if (packs.length === 0) {
+                setCommunityMessage(`No ${status} packs.`, 'text-gray-500 text-sm text-center py-6');
+                return;
+            }
+            for (const pack of packs) {
+                const row = document.createElement('div');
+                row.className = 'p-3 bg-gray-900/50 rounded-lg border border-gray-800 space-y-3';
+
+                const header = document.createElement('div');
+                header.className = 'flex flex-wrap items-center justify-between gap-3';
+                const meta = document.createElement('div');
+                meta.className = 'min-w-0 flex-1 basis-40';
+                const title = document.createElement('div');
+                title.className = 'text-white text-sm font-medium truncate';
+                title.textContent = pack.name;
+                const sub = document.createElement('div');
+                sub.className = 'text-xs text-gray-500 truncate';
+                const author = pack.author ? `by ${pack.author}` : 'no author name';
+                const kind = pack.animated ? 'animated' : 'static';
+                sub.textContent = `${author} · ${pack.emotes.length} ${kind} stickers · ` +
+                    `sent ${formatRelative(pack.createdAt)} · added by ${pack.addCount}`;
+                meta.append(title, sub);
+
+                const actions = document.createElement('div');
+                actions.className = 'flex gap-2 flex-shrink-0';
+                const green = 'bg-green-600/20 hover:bg-green-600 hover:text-white text-green-400 border border-green-600/40';
+                const red = 'bg-red-600/20 hover:bg-red-600 hover:text-white text-red-400 border border-red-600/40';
+                const gray = 'bg-gray-700 hover:bg-gray-600 text-white';
+                if (status === 'pending') {
+                    actions.append(
+                        communityButton('Approve', green, () => updateCommunityPack(pack, 'approved')),
+                        communityButton('Reject', red, () => updateCommunityPack(pack, 'rejected')),
+                    );
+                } else if (status === 'approved') {
+                    actions.appendChild(communityButton('Unpublish', gray, () => updateCommunityPack(pack, 'rejected')));
+                } else {
+                    actions.appendChild(communityButton('Reopen', gray, () => updateCommunityPack(pack, 'pending')));
+                }
+                actions.appendChild(communityButton('Delete', red, () => deleteCommunityPack(pack)));
+                header.append(meta, actions);
+
+                // Every sticker, so the whole pack can be reviewed before approving it.
+                const stickers = document.createElement('div');
+                stickers.className = 'flex flex-wrap gap-1';
+                pack.emotes.forEach(e => stickers.appendChild(makeThumb(e, 'w-10 h-10')));
+
+                row.append(header, stickers);
+                list.appendChild(row);
+            }
+        }
+
+        async function updateCommunityPack(pack, status) {
+            try {
+                const response = await fetch('/api/admin/community-packs/' + pack.id, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ status })
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.message || response.status);
+                log(`<b>${escapeHtml(pack.name)}</b> marked as ${status}`, 'success');
+                loadCommunityPacks();
+                refreshCommunityBadge();
+            } catch (err) {
+                log(`Could not update ${escapeHtml(pack.name)}: ${escapeHtml(err.message)}`, 'error');
+            }
+        }
+
+        async function deleteCommunityPack(pack) {
+            if (!window.confirm(`Delete "${pack.name}"? This can't be undone.`)) return;
+            try {
+                const response = await fetch('/api/admin/community-packs/' + pack.id, { method: 'DELETE' });
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.message || response.status);
+                log(`Deleted <b>${escapeHtml(pack.name)}</b>`, 'success');
+                loadCommunityPacks();
+                refreshCommunityBadge();
+            } catch (err) {
+                log(`Could not delete ${escapeHtml(pack.name)}: ${escapeHtml(err.message)}`, 'error');
+            }
         }
 
         // ---------- Starter packs ----------
@@ -1367,6 +1541,7 @@
         document.addEventListener('DOMContentLoaded', () => {
             loadPreview();
             refreshRequestsBadge();
+            refreshCommunityBadge();
         });
     </script>
 </body>

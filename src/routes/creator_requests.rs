@@ -188,7 +188,7 @@ fn valid_status(s: &str) -> bool {
 }
 
 /// Railway's proxy puts the client address first in X-Forwarded-For.
-fn client_ip(headers: &HeaderMap) -> String {
+pub(super) fn client_ip(headers: &HeaderMap) -> String {
     headers
         .get("x-forwarded-for")
         .and_then(|h| h.to_str().ok())
