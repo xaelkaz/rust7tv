@@ -79,6 +79,10 @@
                 <span id="requestsBadge"
                     class="hidden ml-1 px-1.5 py-0.5 rounded-full bg-purple-600 text-white text-[10px]">0</span>
             </button>
+            <button onclick="switchTab('starters')" id="btn-starters"
+                class="pb-2 text-sm font-medium border-b-2 border-transparent text-gray-400 hover:text-gray-300 transition-colors">
+                Starter Packs
+            </button>
         </div>
 
         <!-- Sync Content Area -->
@@ -233,6 +237,82 @@
                 </div>
             </div>
 
+            <!-- CONTENIDO TAB 4: Starter Packs -->
+            <div id="tab-starters" class="hidden space-y-6">
+                <div class="card rounded-xl p-6 shadow-xl">
+                    <div class="flex justify-between items-center mb-2">
+                        <h2 class="text-xl font-semibold flex items-center gap-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
+                                stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                                class="text-purple-400">
+                                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+                                <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+                                <line x1="12" y1="22.08" x2="12" y2="12" />
+                            </svg>
+                            Starter Packs
+                        </h2>
+                        <button onclick="openStarterEditor(null)"
+                            class="btn bg-purple-600 hover:bg-purple-500 text-white px-3 py-1.5 rounded-lg text-sm">New pack</button>
+                    </div>
+                    <p class="text-xs text-gray-500 mb-4">
+                        Ready-made packs the app shows with a one-tap "Add to WhatsApp", in this order.
+                        Only published packs are visible. A published pack needs 3-30 stickers (12 is a good size).
+                    </p>
+                    <div id="startersList" class="space-y-2">
+                        <div class="text-gray-500 text-sm text-center py-6">Loading starter packs...</div>
+                    </div>
+                </div>
+
+                <div id="starterEditor" class="card rounded-xl p-6 shadow-xl hidden">
+                    <h2 id="starterEditorTitle" class="text-xl font-semibold mb-4">New pack</h2>
+                    <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+                        <div class="md:col-span-2">
+                            <label class="block text-xs font-medium text-gray-400 mb-1">Name</label>
+                            <input type="text" id="starterName" maxlength="40" placeholder="e.g. Risa"
+                                class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-400 mb-1">Emoji</label>
+                            <input type="text" id="starterEmoji" maxlength="8" placeholder="😂"
+                                class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-medium text-gray-400 mb-1">Kind</label>
+                            <select id="starterKind" onchange="changeStarterKind()"
+                                class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500">
+                                <option value="animated">Animated</option>
+                                <option value="static">Static</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="flex justify-between items-center mb-2">
+                        <h3 class="text-sm font-semibold text-gray-300">Stickers in this pack</h3>
+                        <span id="starterCount" class="text-xs text-gray-500">0/30</span>
+                    </div>
+                    <div id="starterSelected" class="grid grid-cols-4 md:grid-cols-8 gap-2 mb-6 min-h-[5rem]"></div>
+
+                    <h3 class="text-sm font-semibold text-gray-300 mb-2">Add stickers</h3>
+                    <div class="flex gap-2 mb-3">
+                        <input type="text" id="starterSearch" placeholder="Search emotes, e.g. kekw"
+                            onkeydown="if (event.key === 'Enter') searchStarterEmotes()"
+                            class="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500">
+                        <button onclick="searchStarterEmotes()"
+                            class="btn bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded-lg text-sm">Search</button>
+                    </div>
+                    <div id="starterResults" class="grid grid-cols-4 md:grid-cols-8 gap-2 max-h-80 overflow-y-auto pr-1 mb-6"></div>
+
+                    <div class="flex flex-wrap gap-2 justify-end">
+                        <button onclick="closeStarterEditor()"
+                            class="btn bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded-lg text-sm">Cancel</button>
+                        <button onclick="saveStarterPack(false)"
+                            class="btn bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded-lg text-sm">Save as draft</button>
+                        <button onclick="saveStarterPack(true)"
+                            class="btn bg-purple-600 hover:bg-purple-500 text-white px-4 py-2 rounded-lg text-sm">Save and publish</button>
+                    </div>
+                </div>
+            </div>
+
         </div>
 
         <!-- Console / Status -->
@@ -342,7 +422,7 @@
         let pendingDeleteFolder = null;
         let usersLoaded = false;
 
-        const TABS = ['trending', 'users', 'requests'];
+        const TABS = ['trending', 'users', 'requests', 'starters'];
 
         // Tab Switching Logic
         function switchTab(tabName) {
@@ -358,6 +438,362 @@
                 tab.classList.toggle('hidden', !active);
             }
             if (tabName === 'requests') loadCreatorRequests();
+            if (tabName === 'starters') loadStarterPacks();
+        }
+
+        // ---------- Starter packs ----------
+        const STARTER_MAX = 30;
+        const STARTER_MIN_PUBLISHED = 3;
+        let starterPacks = [];
+        let starterEditingId = null;
+        let starterEmotes = [];
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function starterThumbUrl(emote) {
+            return (emote.animated ? emote.animatedPreviewUrl : emote.posterUrl) || emote.url;
+        }
+
+        function makeThumb(emote, sizeClass) {
+            const box = document.createElement('div');
+            box.className = `${sizeClass} rounded-lg bg-gray-900/60 border border-gray-800 flex items-center justify-center overflow-hidden`;
+            const img = document.createElement('img');
+            img.src = starterThumbUrl(emote);
+            img.alt = emote.emoteName;
+            img.title = emote.emoteName;
+            img.loading = 'lazy';
+            img.referrerPolicy = 'no-referrer';
+            img.className = 'max-w-full max-h-full object-contain';
+            box.appendChild(img);
+            return box;
+        }
+
+        async function loadStarterPacks() {
+            const list = document.getElementById('startersList');
+            try {
+                const response = await fetch('/api/admin/starter-packs');
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.message || response.status);
+                starterPacks = data.packs || [];
+                renderStarterPacks();
+            } catch (err) {
+                list.replaceChildren();
+                const e = document.createElement('div');
+                e.className = 'text-red-400 text-sm text-center py-6';
+                e.textContent = 'Failed to load starter packs: ' + err.message;
+                list.appendChild(e);
+            }
+        }
+
+        function renderStarterPacks() {
+            const list = document.getElementById('startersList');
+            list.replaceChildren();
+            if (starterPacks.length === 0) {
+                const empty = document.createElement('div');
+                empty.className = 'text-gray-500 text-sm text-center py-6';
+                empty.textContent = 'No starter packs yet. Create one with "New pack".';
+                list.appendChild(empty);
+                return;
+            }
+            starterPacks.forEach((pack, index) => {
+                const row = document.createElement('div');
+                row.className = 'flex items-center justify-between gap-3 p-3 bg-gray-900/50 rounded-lg border border-gray-800';
+
+                const left = document.createElement('div');
+                left.className = 'flex items-center gap-3 min-w-0';
+                const order = document.createElement('div');
+                order.className = 'flex flex-col';
+                const up = document.createElement('button');
+                up.className = 'text-gray-400 hover:text-white text-xs disabled:opacity-20';
+                up.textContent = '▲';
+                up.disabled = index === 0;
+                up.addEventListener('click', () => moveStarterPack(index, -1));
+                const down = document.createElement('button');
+                down.className = 'text-gray-400 hover:text-white text-xs disabled:opacity-20';
+                down.textContent = '▼';
+                down.disabled = index === starterPacks.length - 1;
+                down.addEventListener('click', () => moveStarterPack(index, 1));
+                order.append(up, down);
+
+                const previews = document.createElement('div');
+                previews.className = 'flex gap-1 flex-shrink-0';
+                pack.emotes.slice(0, 4).forEach(e => previews.appendChild(makeThumb(e, 'w-9 h-9')));
+
+                const meta = document.createElement('div');
+                meta.className = 'min-w-0';
+                const title = document.createElement('div');
+                title.className = 'text-white text-sm font-medium truncate';
+                title.textContent = `${pack.emoji ? pack.emoji + ' ' : ''}${pack.name}`;
+                const sub = document.createElement('div');
+                sub.className = 'text-xs text-gray-500';
+                sub.textContent = `${pack.emotes.length} ${pack.animated ? 'animated' : 'static'} stickers`;
+                meta.append(title, sub);
+                left.append(order, previews, meta);
+
+                const actions = document.createElement('div');
+                actions.className = 'flex items-center gap-2 flex-shrink-0';
+                const status = document.createElement('span');
+                status.className = pack.published
+                    ? 'px-2 py-0.5 rounded bg-green-500/10 text-green-400 text-[10px] border border-green-500/20'
+                    : 'px-2 py-0.5 rounded bg-gray-700/40 text-gray-400 text-[10px] border border-gray-700';
+                status.textContent = pack.published ? 'Published' : 'Draft';
+                const toggle = document.createElement('button');
+                toggle.className = 'btn bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 rounded text-xs';
+                toggle.textContent = pack.published ? 'Unpublish' : 'Publish';
+                toggle.addEventListener('click', () => setStarterPublished(pack, !pack.published));
+                const edit = document.createElement('button');
+                edit.className = 'btn bg-purple-600 hover:bg-purple-500 text-white px-3 py-1 rounded text-xs';
+                edit.textContent = 'Edit';
+                edit.addEventListener('click', () => openStarterEditor(pack));
+                const del = document.createElement('button');
+                del.className = 'btn bg-red-600/20 hover:bg-red-600 hover:text-white text-red-400 border border-red-600/40 px-3 py-1 rounded text-xs';
+                del.textContent = 'Delete';
+                del.addEventListener('click', () => deleteStarterPack(pack));
+                actions.append(status, toggle, edit, del);
+
+                row.append(left, actions);
+                list.appendChild(row);
+            });
+        }
+
+        function starterPayload(pack, emotes, published) {
+            return {
+                name: pack.name,
+                emoji: pack.emoji || null,
+                animated: pack.animated,
+                published,
+                emotes: emotes.map(e => ({
+                    emoteId: e.emoteId,
+                    emoteName: e.emoteName,
+                    fileName: e.fileName,
+                    url: e.url,
+                    animated: !!e.animated,
+                    animatedPreviewUrl: e.animatedPreviewUrl || null,
+                    posterUrl: e.posterUrl || null,
+                    tags: e.tags || [],
+                })),
+            };
+        }
+
+        async function sendStarterPack(id, payload) {
+            const response = await fetch(id === null ? '/api/admin/starter-packs' : '/api/admin/starter-packs/' + id, {
+                method: id === null ? 'POST' : 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const data = await response.json();
+            if (!response.ok || !data.success) throw new Error(data.message || response.status);
+            return data.pack;
+        }
+
+        async function setStarterPublished(pack, published) {
+            try {
+                await sendStarterPack(pack.id, starterPayload(pack, pack.emotes, published));
+                log(`${escapeHtml(pack.name)} ${published ? 'published' : 'moved to drafts'}`, 'success');
+                loadStarterPacks();
+            } catch (err) {
+                log(`Could not update ${escapeHtml(pack.name)}: ${escapeHtml(err.message)}`, 'error');
+            }
+        }
+
+        async function moveStarterPack(index, delta) {
+            const target = index + delta;
+            if (target < 0 || target >= starterPacks.length) return;
+            const ids = starterPacks.map(p => p.id);
+            [ids[index], ids[target]] = [ids[target], ids[index]];
+            try {
+                const response = await fetch('/api/admin/starter-packs/order', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ids }),
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.message || response.status);
+                loadStarterPacks();
+            } catch (err) {
+                log(`Could not reorder packs: ${escapeHtml(err.message)}`, 'error');
+            }
+        }
+
+        async function deleteStarterPack(pack) {
+            if (!window.confirm(`Delete "${pack.name}"? Users who already added it keep their copy.`)) return;
+            try {
+                const response = await fetch('/api/admin/starter-packs/' + pack.id, { method: 'DELETE' });
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.message || response.status);
+                log(`Deleted ${escapeHtml(pack.name)}`, 'success');
+                if (starterEditingId === pack.id) closeStarterEditor();
+                loadStarterPacks();
+            } catch (err) {
+                log(`Could not delete ${escapeHtml(pack.name)}: ${escapeHtml(err.message)}`, 'error');
+            }
+        }
+
+        function openStarterEditor(pack) {
+            starterEditingId = pack ? pack.id : null;
+            starterEmotes = pack ? pack.emotes.slice() : [];
+            document.getElementById('starterEditorTitle').textContent = pack ? `Edit "${pack.name}"` : 'New pack';
+            document.getElementById('starterName').value = pack ? pack.name : '';
+            document.getElementById('starterEmoji').value = pack && pack.emoji ? pack.emoji : '';
+            document.getElementById('starterKind').value = pack && !pack.animated ? 'static' : 'animated';
+            document.getElementById('starterResults').replaceChildren();
+            document.getElementById('starterEditor').classList.remove('hidden');
+            renderStarterSelected();
+            document.getElementById('starterName').focus();
+        }
+
+        function closeStarterEditor() {
+            starterEditingId = null;
+            starterEmotes = [];
+            document.getElementById('starterEditor').classList.add('hidden');
+        }
+
+        function starterKindIsAnimated() {
+            return document.getElementById('starterKind').value === 'animated';
+        }
+
+        function changeStarterKind() {
+            // WhatsApp packs are all-animated or all-static, so switching kind drops the selection.
+            if (starterEmotes.length > 0 && !window.confirm('Changing the kind removes the selected stickers. Continue?')) {
+                document.getElementById('starterKind').value = starterKindIsAnimated() ? 'static' : 'animated';
+                return;
+            }
+            starterEmotes = [];
+            document.getElementById('starterResults').replaceChildren();
+            renderStarterSelected();
+        }
+
+        function renderStarterSelected() {
+            const grid = document.getElementById('starterSelected');
+            grid.replaceChildren();
+            document.getElementById('starterCount').textContent =
+                `${starterEmotes.length}/${STARTER_MAX}` + (starterEmotes.length < STARTER_MIN_PUBLISHED ? ` · needs ${STARTER_MIN_PUBLISHED} to publish` : '');
+            if (starterEmotes.length === 0) {
+                const empty = document.createElement('div');
+                empty.className = 'col-span-full text-gray-500 text-sm py-6 text-center';
+                empty.textContent = 'Search below and click a sticker to add it.';
+                grid.appendChild(empty);
+                return;
+            }
+            starterEmotes.forEach((emote, index) => {
+                const cell = document.createElement('div');
+                cell.className = 'flex flex-col items-center gap-1';
+                cell.appendChild(makeThumb(emote, 'w-16 h-16'));
+                const name = document.createElement('div');
+                name.className = 'text-[10px] text-gray-400 truncate w-16 text-center';
+                name.textContent = emote.emoteName;
+                const controls = document.createElement('div');
+                controls.className = 'flex gap-1 text-xs';
+                const left = document.createElement('button');
+                left.className = 'text-gray-400 hover:text-white disabled:opacity-20';
+                left.textContent = '◀';
+                left.disabled = index === 0;
+                left.addEventListener('click', () => moveStarterEmote(index, -1));
+                const remove = document.createElement('button');
+                remove.className = 'text-red-400 hover:text-red-300';
+                remove.textContent = '✕';
+                remove.title = 'Remove';
+                remove.addEventListener('click', () => { starterEmotes.splice(index, 1); renderStarterSelected(); });
+                const right = document.createElement('button');
+                right.className = 'text-gray-400 hover:text-white disabled:opacity-20';
+                right.textContent = '▶';
+                right.disabled = index === starterEmotes.length - 1;
+                right.addEventListener('click', () => moveStarterEmote(index, 1));
+                controls.append(left, remove, right);
+                cell.append(name, controls);
+                grid.appendChild(cell);
+            });
+        }
+
+        function moveStarterEmote(index, delta) {
+            const target = index + delta;
+            if (target < 0 || target >= starterEmotes.length) return;
+            [starterEmotes[index], starterEmotes[target]] = [starterEmotes[target], starterEmotes[index]];
+            renderStarterSelected();
+        }
+
+        async function searchStarterEmotes() {
+            const query = document.getElementById('starterSearch').value.trim();
+            const results = document.getElementById('starterResults');
+            if (!query) return;
+            const animated = starterKindIsAnimated();
+            results.replaceChildren();
+            const loading = document.createElement('div');
+            loading.className = 'col-span-full text-gray-500 text-sm py-4 text-center';
+            loading.textContent = 'Searching...';
+            results.appendChild(loading);
+            try {
+                const response = await fetch('/api/search-emotes', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query, perPage: 40, page: 1, animated_only: animated }),
+                });
+                const data = await response.json();
+                const emotes = (data.emotes || []).filter(e => !!e.animated === animated);
+                results.replaceChildren();
+                if (emotes.length === 0) {
+                    const none = document.createElement('div');
+                    none.className = 'col-span-full text-gray-500 text-sm py-4 text-center';
+                    none.textContent = `No ${animated ? 'animated' : 'static'} results.`;
+                    results.appendChild(none);
+                    return;
+                }
+                for (const emote of emotes) {
+                    const already = starterEmotes.some(e => e.emoteId === emote.emoteId);
+                    const cell = document.createElement('button');
+                    cell.className = 'flex flex-col items-center gap-1 p-1 rounded-lg hover:bg-gray-800 disabled:opacity-30';
+                    cell.disabled = already;
+                    cell.appendChild(makeThumb(emote, 'w-16 h-16'));
+                    const name = document.createElement('div');
+                    name.className = 'text-[10px] text-gray-400 truncate w-16 text-center';
+                    name.textContent = emote.emoteName;
+                    cell.appendChild(name);
+                    cell.addEventListener('click', () => {
+                        if (starterEmotes.length >= STARTER_MAX) {
+                            log(`A pack can have at most ${STARTER_MAX} stickers`, 'error');
+                            return;
+                        }
+                        starterEmotes.push(emote);
+                        cell.disabled = true;
+                        renderStarterSelected();
+                    });
+                    results.appendChild(cell);
+                }
+            } catch (err) {
+                results.replaceChildren();
+                const e = document.createElement('div');
+                e.className = 'col-span-full text-red-400 text-sm py-4 text-center';
+                e.textContent = 'Search failed: ' + err.message;
+                results.appendChild(e);
+            }
+        }
+
+        async function saveStarterPack(publish) {
+            const pack = {
+                name: document.getElementById('starterName').value.trim(),
+                emoji: document.getElementById('starterEmoji').value.trim(),
+                animated: starterKindIsAnimated(),
+            };
+            if (!pack.name) {
+                log('Give the pack a name first', 'error');
+                return;
+            }
+            if (publish && starterEmotes.length < STARTER_MIN_PUBLISHED) {
+                log(`A published pack needs at least ${STARTER_MIN_PUBLISHED} stickers`, 'error');
+                return;
+            }
+            try {
+                await sendStarterPack(starterEditingId, starterPayload(pack, starterEmotes, publish));
+                log(`${escapeHtml(pack.name)} saved${publish ? ' and published' : ' as draft'}`, 'success');
+                closeStarterEditor();
+                loadStarterPacks();
+            } catch (err) {
+                log(`Could not save ${escapeHtml(pack.name)}: ${escapeHtml(err.message)}`, 'error');
+            }
         }
 
         // Sub-tab switching inside User Sync

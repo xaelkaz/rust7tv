@@ -1,5 +1,5 @@
 use axum::{
-    routing::{get, post, delete, patch},
+    routing::{get, post, put, delete, patch},
     Router,
     Json,
     middleware,
@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 mod auth;
 mod creator_requests;
 mod dashboard;
+mod starter_packs;
 
 pub fn create_router(state: Arc<AppState>) -> Router {
     let public = Router::new()
@@ -34,7 +35,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/creator-requests/mine",
             get(creator_requests::my_creator_requests_handler),
-        );
+        )
+        .route("/api/starter-packs", get(starter_packs::list_published_handler));
 
     let admin = Router::new()
         .route("/admin/dashboard", get(dashboard::dashboard_handler))
@@ -49,6 +51,18 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/admin/creator-requests/:id",
             patch(creator_requests::update_creator_request_handler),
+        )
+        .route(
+            "/api/admin/starter-packs",
+            get(starter_packs::admin_list_handler).post(starter_packs::create_handler),
+        )
+        .route(
+            "/api/admin/starter-packs/order",
+            put(starter_packs::reorder_handler),
+        )
+        .route(
+            "/api/admin/starter-packs/:id",
+            put(starter_packs::update_handler).delete(starter_packs::delete_handler),
         )
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&state),
