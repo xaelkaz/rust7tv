@@ -1,9 +1,9 @@
 //! Community packs: sticker packs users publish from the app.
 //!
 //! A published pack waits in the dashboard until the admin approves it; approved packs are
-//! served to the app most added first. Packs carry the same random per-install id as creator
-//! requests, so each install can read back the review status of its own packs and adds are
-//! counted once per device.
+//! served to the app most liked first, or most recently approved first. Packs carry the same
+//! random per-install id as creator requests, so each install can read back the review status
+//! of its own packs, and likes and adds are counted once per device.
 
 use axum::{
     extract::{Path, Query, State},
@@ -30,9 +30,10 @@ const MAX_EMOTE_NAME_CHARS: usize = 100;
 const MAX_PENDING_PER_DEVICE: i64 = 5;
 const PUBLISH_RATE_LIMIT: i64 = 10;
 const ADD_RATE_LIMIT: i64 = 60;
+const LIKE_RATE_LIMIT: i64 = 120;
 const RATE_LIMIT_WINDOW_SECONDS: i64 = 3600;
-/// Approved packs served to the app.
-const PUBLIC_LIMIT: i64 = 30;
+/// Approved packs served to the app per request; the Community tab lists them all.
+const PUBLIC_LIMIT: i64 = 50;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,6 +62,9 @@ pub struct CommunityPack {
     pub animated: bool,
     pub status: String,
     pub add_count: i32,
+    pub like_count: i32,
+    /// Whether the install that asked (`deviceId`) likes the pack; false when it didn't say.
+    pub liked_by_me: bool,
     pub created_at: DateTime<Utc>,
     pub emotes: Vec<EmoteResponse>,
 }
@@ -122,7 +126,65 @@ pub struct AddResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicListQuery {
+    /// "popular" (default) or "new"
+    pub sort: Option<String>,
+    /// Lets the app show which packs this install liked.
+    pub device_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LikeInput {
+    pub device_id: String,
+    /// True to like the pack, false to take the like back.
+    pub liked: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LikeResponse {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub like_count: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liked: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// How a list of packs is ordered.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Order {
+    /// Most liked first, then most added: the app's default view.
+    Popular,
+    /// Most recently approved first, so new packs get seen too.
+    New,
+    /// Most recently submitted first: the dashboard's review queue.
+    Submitted,
+}
+
+impl Order {
+    fn sql(self) -> &'static str {
+        match self {
+            Order::Popular => "like_count DESC, add_count DESC, reviewed_at DESC NULLS LAST, id DESC",
+            Order::New => "reviewed_at DESC NULLS LAST, id DESC",
+            Order::Submitted => "created_at DESC, id DESC",
+        }
+    }
+
+    fn from_public(sort: Option<&str>) -> Order {
+        match sort {
+            Some("new") => Order::New,
+            _ => Order::Popular,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct StatusQuery {
+    /// "pending" (default), "approved", "rejected" or "all"
     pub status: Option<String>,
 }
 
@@ -146,6 +208,7 @@ struct PackRow {
     animated: bool,
     status: String,
     add_count: i32,
+    like_count: i32,
     created_at: DateTime<Utc>,
 }
 
@@ -158,6 +221,15 @@ struct ItemRow {
 
 fn valid_status(s: &str) -> bool {
     matches!(s, "pending" | "approved" | "rejected")
+}
+
+/// The dashboard's status filter: None lists every pack ("all"), pending is the default.
+fn admin_status_filter(raw: Option<&str>) -> Result<Option<&str>, ()> {
+    match raw.unwrap_or("pending") {
+        "all" => Ok(None),
+        status if valid_status(status) => Ok(Some(status)),
+        _ => Err(()),
+    }
 }
 
 /// 7TV ids: legacy ObjectIds are 24 hex chars, current ones 26-char ULIDs.
@@ -230,22 +302,20 @@ fn emote_response(emote_id: String, emote_name: String, animated: bool) -> Emote
     }
 }
 
-/// Packs with the given status: most added first for the app, newest first for the dashboard.
+/// Packs with the given status (every pack when None), in the given order. With a device id,
+/// each pack says whether that install likes it.
 async fn load_packs(
     db: &sqlx::Pool<sqlx::Postgres>,
-    status: &str,
-    most_added_first: bool,
+    status: Option<&str>,
+    order: Order,
     limit: i64,
+    device_id: Option<&str>,
 ) -> Result<Vec<CommunityPack>, sqlx::Error> {
-    let order = if most_added_first {
-        "add_count DESC, reviewed_at DESC NULLS LAST, id DESC"
-    } else {
-        "created_at DESC, id DESC"
-    };
+    let order = order.sql();
     let packs = sqlx::query_as::<_, PackRow>(&format!(
-        "SELECT id, name, author_name, animated, status, add_count, created_at
+        "SELECT id, name, author_name, animated, status, add_count, like_count, created_at
          FROM community_packs
-         WHERE status = $1
+         WHERE $1::text IS NULL OR status = $1
          ORDER BY {order}
          LIMIT $2"
     ))
@@ -264,6 +334,19 @@ async fn load_packs(
     .bind(&ids)
     .fetch_all(db)
     .await?;
+
+    let liked: HashSet<i32> = match device_id {
+        Some(device_id) => sqlx::query_scalar(
+            "SELECT pack_id FROM community_pack_likes WHERE device_id = $1 AND pack_id = ANY($2)",
+        )
+        .bind(device_id)
+        .bind(&ids)
+        .fetch_all(db)
+        .await?
+        .into_iter()
+        .collect(),
+        None => HashSet::new(),
+    };
 
     let animated_by_pack: HashMap<i32, bool> = packs.iter().map(|p| (p.id, p.animated)).collect();
     let mut by_pack: HashMap<i32, Vec<EmoteResponse>> = HashMap::new();
@@ -285,6 +368,8 @@ async fn load_packs(
             animated: p.animated,
             status: p.status,
             add_count: p.add_count,
+            like_count: p.like_count,
+            liked_by_me: liked.contains(&p.id),
             created_at: p.created_at,
         })
         .collect())
@@ -391,11 +476,15 @@ pub async fn publish_handler(
     }
 }
 
-/// Public: approved packs, most added first.
+/// Public: approved packs, most liked first or (`?sort=new`) most recently approved first.
+/// With `?deviceId=`, each pack also says whether that install likes it.
 pub async fn list_approved_handler(
     State(state): State<Arc<AppState>>,
+    Query(params): Query<PublicListQuery>,
 ) -> (StatusCode, Json<CommunityPacksResponse>) {
-    list_response(load_packs(&state.db, "approved", true, PUBLIC_LIMIT).await)
+    let order = Order::from_public(params.sort.as_deref());
+    let device_id = params.device_id.as_deref().filter(|id| valid_device_id(id));
+    list_response(load_packs(&state.db, Some("approved"), order, PUBLIC_LIMIT, device_id).await)
 }
 
 /// Public: the review status of the packs this install published.
@@ -529,6 +618,97 @@ pub async fn record_add_handler(
     }
 }
 
+fn like_error(status: StatusCode, message: &str) -> (StatusCode, Json<LikeResponse>) {
+    (
+        status,
+        Json(LikeResponse {
+            success: false,
+            like_count: None,
+            liked: None,
+            message: Some(message.to_string()),
+        }),
+    )
+}
+
+/// Public: an install likes an approved pack, or takes its like back. One like per install.
+pub async fn set_like_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i32>,
+    Json(input): Json<LikeInput>,
+) -> (StatusCode, Json<LikeResponse>) {
+    if !valid_device_id(&input.device_id) {
+        return like_error(StatusCode::BAD_REQUEST, "Invalid device id");
+    }
+    if over_rate_limit(&state, "community_likes", &headers, LIKE_RATE_LIMIT).await {
+        return like_error(StatusCode::TOO_MANY_REQUESTS, "Too many requests, try again later");
+    }
+
+    let result: Result<Option<i32>, sqlx::Error> = async {
+        let mut tx = state.db.begin().await?;
+        let approved: Option<bool> =
+            sqlx::query_scalar("SELECT status = 'approved' FROM community_packs WHERE id = $1 FOR UPDATE")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if approved != Some(true) {
+            return Ok(None);
+        }
+        let changed = if input.liked {
+            sqlx::query(
+                "INSERT INTO community_pack_likes (pack_id, device_id)
+                 VALUES ($1, $2)
+                 ON CONFLICT DO NOTHING",
+            )
+        } else {
+            sqlx::query("DELETE FROM community_pack_likes WHERE pack_id = $1 AND device_id = $2")
+        }
+        .bind(id)
+        .bind(&input.device_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            == 1;
+        // Liking twice or unliking a pack that wasn't liked leaves the count alone.
+        let like_count: i32 = if changed {
+            sqlx::query_scalar(
+                "UPDATE community_packs SET like_count = GREATEST(like_count + $2, 0)
+                 WHERE id = $1
+                 RETURNING like_count",
+            )
+            .bind(id)
+            .bind(if input.liked { 1 } else { -1 })
+            .fetch_one(&mut *tx)
+            .await?
+        } else {
+            sqlx::query_scalar("SELECT like_count FROM community_packs WHERE id = $1")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await?
+        };
+        tx.commit().await?;
+        Ok(Some(like_count))
+    }
+    .await;
+
+    match result {
+        Ok(Some(like_count)) => (
+            StatusCode::OK,
+            Json(LikeResponse {
+                success: true,
+                like_count: Some(like_count),
+                liked: Some(input.liked),
+                message: None,
+            }),
+        ),
+        Ok(None) => like_error(StatusCode::NOT_FOUND, "Pack not found"),
+        Err(e) => {
+            tracing::error!("Failed to update a like on community pack {}: {:?}", id, e);
+            like_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        }
+    }
+}
+
 fn list_response(
     result: Result<Vec<CommunityPack>, sqlx::Error>,
 ) -> (StatusCode, Json<CommunityPacksResponse>) {
@@ -555,13 +735,12 @@ fn list_response(
     }
 }
 
-/// Admin: packs with a review status (pending by default), newest first.
+/// Admin: packs with a review status (pending by default, or every pack), newest first.
 pub async fn admin_list_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<StatusQuery>,
 ) -> (StatusCode, Json<CommunityPacksResponse>) {
-    let status = params.status.unwrap_or_else(|| "pending".to_string());
-    if !valid_status(&status) {
+    let Ok(status) = admin_status_filter(params.status.as_deref()) else {
         return (
             StatusCode::BAD_REQUEST,
             Json(CommunityPacksResponse {
@@ -570,8 +749,8 @@ pub async fn admin_list_handler(
                 message: Some("Invalid status".to_string()),
             }),
         );
-    }
-    list_response(load_packs(&state.db, &status, false, 500).await)
+    };
+    list_response(load_packs(&state.db, status, Order::Submitted, 500, None).await)
 }
 
 fn simple(status: StatusCode, success: bool, message: Option<&str>) -> (StatusCode, Json<SimpleResponse>) {
@@ -715,6 +894,28 @@ mod tests {
         let mut pack = input(3);
         pack.device_id = "short".to_string();
         assert!(validate_publish(&pack).is_err());
+    }
+
+    #[test]
+    fn admin_filter_lists_every_pack_with_all() {
+        assert_eq!(admin_status_filter(None), Ok(Some("pending")));
+        assert_eq!(admin_status_filter(Some("approved")), Ok(Some("approved")));
+        assert_eq!(admin_status_filter(Some("all")), Ok(None));
+        assert_eq!(admin_status_filter(Some("deleted")), Err(()));
+    }
+
+    #[test]
+    fn popular_ranks_by_likes_before_adds() {
+        assert!(Order::Popular.sql().starts_with("like_count DESC, add_count DESC"));
+    }
+
+    #[test]
+    fn public_sort_defaults_to_popular() {
+        assert_eq!(Order::from_public(None), Order::Popular);
+        assert_eq!(Order::from_public(Some("popular")), Order::Popular);
+        assert_eq!(Order::from_public(Some("new")), Order::New);
+        // Anything else never reaches the SQL: it falls back to the default order.
+        assert_eq!(Order::from_public(Some("id; DROP TABLE x")), Order::Popular);
     }
 
     #[test]

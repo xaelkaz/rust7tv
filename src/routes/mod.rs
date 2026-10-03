@@ -49,6 +49,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/community-packs/:id/adds",
             post(community_packs::record_add_handler),
+        )
+        .route(
+            "/api/community-packs/:id/like",
+            post(community_packs::set_like_handler),
         );
 
     let admin = Router::new()
