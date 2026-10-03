@@ -1,7 +1,7 @@
 //! Community packs: sticker packs users publish from the app.
 //!
 //! A published pack waits in the dashboard until the admin approves it; approved packs are
-//! served to the app most added first. Packs carry the same random per-install id as creator
+//! served to the app most added first, or most recently approved first. Packs carry the same random per-install id as creator
 //! requests, so each install can read back the review status of its own packs and adds are
 //! counted once per device.
 
@@ -31,8 +31,8 @@ const MAX_PENDING_PER_DEVICE: i64 = 5;
 const PUBLISH_RATE_LIMIT: i64 = 10;
 const ADD_RATE_LIMIT: i64 = 60;
 const RATE_LIMIT_WINDOW_SECONDS: i64 = 3600;
-/// Approved packs served to the app.
-const PUBLIC_LIMIT: i64 = 30;
+/// Approved packs served to the app per request; the Community tab lists them all.
+const PUBLIC_LIMIT: i64 = 50;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -119,6 +119,40 @@ pub struct AddResponse {
     pub add_count: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PublicListQuery {
+    /// "popular" (default) or "new"
+    pub sort: Option<String>,
+}
+
+/// How a list of packs is ordered.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Order {
+    /// Most added first: the app's default view.
+    Popular,
+    /// Most recently approved first, so new packs get seen too.
+    New,
+    /// Most recently submitted first: the dashboard's review queue.
+    Submitted,
+}
+
+impl Order {
+    fn sql(self) -> &'static str {
+        match self {
+            Order::Popular => "add_count DESC, reviewed_at DESC NULLS LAST, id DESC",
+            Order::New => "reviewed_at DESC NULLS LAST, id DESC",
+            Order::Submitted => "created_at DESC, id DESC",
+        }
+    }
+
+    fn from_public(sort: Option<&str>) -> Order {
+        match sort {
+            Some("new") => Order::New,
+            _ => Order::Popular,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -230,18 +264,14 @@ fn emote_response(emote_id: String, emote_name: String, animated: bool) -> Emote
     }
 }
 
-/// Packs with the given status: most added first for the app, newest first for the dashboard.
+/// Packs with the given status, in the given order.
 async fn load_packs(
     db: &sqlx::Pool<sqlx::Postgres>,
     status: &str,
-    most_added_first: bool,
+    order: Order,
     limit: i64,
 ) -> Result<Vec<CommunityPack>, sqlx::Error> {
-    let order = if most_added_first {
-        "add_count DESC, reviewed_at DESC NULLS LAST, id DESC"
-    } else {
-        "created_at DESC, id DESC"
-    };
+    let order = order.sql();
     let packs = sqlx::query_as::<_, PackRow>(&format!(
         "SELECT id, name, author_name, animated, status, add_count, created_at
          FROM community_packs
@@ -391,11 +421,13 @@ pub async fn publish_handler(
     }
 }
 
-/// Public: approved packs, most added first.
+/// Public: approved packs, most added first or (`?sort=new`) most recently approved first.
 pub async fn list_approved_handler(
     State(state): State<Arc<AppState>>,
+    Query(params): Query<PublicListQuery>,
 ) -> (StatusCode, Json<CommunityPacksResponse>) {
-    list_response(load_packs(&state.db, "approved", true, PUBLIC_LIMIT).await)
+    let order = Order::from_public(params.sort.as_deref());
+    list_response(load_packs(&state.db, "approved", order, PUBLIC_LIMIT).await)
 }
 
 /// Public: the review status of the packs this install published.
@@ -571,7 +603,7 @@ pub async fn admin_list_handler(
             }),
         );
     }
-    list_response(load_packs(&state.db, &status, false, 500).await)
+    list_response(load_packs(&state.db, &status, Order::Submitted, 500).await)
 }
 
 fn simple(status: StatusCode, success: bool, message: Option<&str>) -> (StatusCode, Json<SimpleResponse>) {
@@ -715,6 +747,15 @@ mod tests {
         let mut pack = input(3);
         pack.device_id = "short".to_string();
         assert!(validate_publish(&pack).is_err());
+    }
+
+    #[test]
+    fn public_sort_defaults_to_popular() {
+        assert_eq!(Order::from_public(None), Order::Popular);
+        assert_eq!(Order::from_public(Some("popular")), Order::Popular);
+        assert_eq!(Order::from_public(Some("new")), Order::New);
+        // Anything else never reaches the SQL: it falls back to the default order.
+        assert_eq!(Order::from_public(Some("id; DROP TABLE x")), Order::Popular);
     }
 
     #[test]
