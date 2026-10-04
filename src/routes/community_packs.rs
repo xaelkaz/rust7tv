@@ -6,6 +6,7 @@
 //! of its own packs, and likes and adds are counted once per device.
 
 use axum::{
+    body::Bytes,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     Json,
@@ -13,10 +14,12 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 use super::creator_requests::{client_ip, valid_device_id};
-use crate::models::EmoteResponse;
+use super::sticker_files::{validate_sticker, ANIMATED_MAX_BYTES};
+use crate::models::{EmoteResponse, PackEmote};
 use crate::AppState;
 
 /// WhatsApp rejects packs with fewer stickers than this.
@@ -31,6 +34,10 @@ const MAX_PENDING_PER_DEVICE: i64 = 5;
 const PUBLISH_RATE_LIMIT: i64 = 10;
 const ADD_RATE_LIMIT: i64 = 60;
 const LIKE_RATE_LIMIT: i64 = 120;
+/// Thirty stickers for a handful of packs, with retries.
+const UPLOAD_RATE_LIMIT: i64 = 600;
+/// Request body cap for a sticker upload: the largest file WhatsApp accepts, plus slack.
+pub const MAX_UPLOAD_BYTES: usize = ANIMATED_MAX_BYTES + 16 * 1024;
 const RATE_LIMIT_WINDOW_SECONDS: i64 = 3600;
 /// Approved packs served to the app per request; the Community tab lists them all.
 const PUBLIC_LIMIT: i64 = 50;
@@ -66,7 +73,9 @@ pub struct CommunityPack {
     /// Whether the install that asked (`deviceId`) likes the pack; false when it didn't say.
     pub liked_by_me: bool,
     pub created_at: DateTime<Utc>,
-    pub emotes: Vec<EmoteResponse>,
+    /// Stickers whose WhatsApp-ready file was uploaded; a pack is approved once all have one.
+    pub sticker_files: i32,
+    pub emotes: Vec<PackEmote>,
 }
 
 #[derive(Debug, Serialize)]
@@ -84,6 +93,8 @@ pub struct MyCommunityPack {
     pub id: i32,
     pub name: String,
     pub status: String,
+    /// Stickers whose WhatsApp-ready file hasn't been uploaded yet, so the app can finish.
+    pub missing_stickers: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -217,6 +228,7 @@ struct ItemRow {
     pack_id: i32,
     emote_id: String,
     emote_name: String,
+    sticker_url: Option<String>,
 }
 
 fn valid_status(s: &str) -> bool {
@@ -298,7 +310,8 @@ fn emote_response(emote_id: String, emote_name: String, animated: bool) -> Emote
         animated: Some(animated),
         scale: None,
         mime: None,
-        tags: None,
+        // Always sent, even empty: the app's model doesn't expect the field to be missing.
+        tags: Some(Vec::new()),
     }
 }
 
@@ -326,7 +339,7 @@ async fn load_packs(
 
     let ids: Vec<i32> = packs.iter().map(|p| p.id).collect();
     let items = sqlx::query_as::<_, ItemRow>(
-        "SELECT pack_id, emote_id, emote_name
+        "SELECT pack_id, emote_id, emote_name, sticker_url
          FROM community_pack_items
          WHERE pack_id = ANY($1)
          ORDER BY pack_id, position",
@@ -349,19 +362,25 @@ async fn load_packs(
     };
 
     let animated_by_pack: HashMap<i32, bool> = packs.iter().map(|p| (p.id, p.animated)).collect();
-    let mut by_pack: HashMap<i32, Vec<EmoteResponse>> = HashMap::new();
+    let mut by_pack: HashMap<i32, Vec<PackEmote>> = HashMap::new();
     for item in items {
         let animated = animated_by_pack.get(&item.pack_id).copied().unwrap_or(false);
-        by_pack
-            .entry(item.pack_id)
-            .or_default()
-            .push(emote_response(item.emote_id, item.emote_name, animated));
+        by_pack.entry(item.pack_id).or_default().push(PackEmote {
+            emote: emote_response(item.emote_id, item.emote_name, animated),
+            sticker_url: item.sticker_url,
+        });
     }
 
     Ok(packs
         .into_iter()
-        .map(|p| CommunityPack {
-            emotes: by_pack.remove(&p.id).unwrap_or_default(),
+        .map(|p| {
+            let emotes = by_pack.remove(&p.id).unwrap_or_default();
+            let sticker_files = emotes.iter().filter(|e| e.sticker_url.is_some()).count() as i32;
+            (p, emotes, sticker_files)
+        })
+        .map(|(p, emotes, sticker_files)| CommunityPack {
+            emotes,
+            sticker_files,
             id: p.id,
             name: p.name,
             author: p.author_name,
@@ -461,6 +480,7 @@ pub async fn publish_handler(
                     id,
                     name,
                     status: "pending".to_string(),
+                    missing_stickers: input.emotes.iter().map(|e| e.emote_id.clone()).collect(),
                 }),
                 message: None,
             }),
@@ -504,9 +524,14 @@ pub async fn my_packs_handler(
     }
 
     let rows = sqlx::query_as::<_, MyCommunityPack>(
-        "SELECT id, name, status
-         FROM community_packs
-         WHERE device_id = $1
+        "SELECT p.id, p.name, p.status,
+                ARRAY(
+                    SELECT i.emote_id FROM community_pack_items i
+                    WHERE i.pack_id = p.id AND i.sticker_url IS NULL
+                    ORDER BY i.position
+                ) AS missing_stickers
+         FROM community_packs p
+         WHERE p.device_id = $1
          ORDER BY created_at DESC
          LIMIT 100",
     )
@@ -753,6 +778,116 @@ pub async fn admin_list_handler(
     list_response(load_packs(&state.db, status, Order::Submitted, 500, None).await)
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadResponse {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sticker_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+fn upload_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<UploadResponse>) {
+    (
+        status,
+        Json(UploadResponse {
+            success: false,
+            sticker_url: None,
+            message: Some(message.into()),
+        }),
+    )
+}
+
+/// Lowercase hex of the first `bytes` bytes of a SHA-256, used to name stored files by content.
+fn short_sha256(data: &[u8], bytes: usize) -> String {
+    Sha256::digest(data)[..bytes].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Public: the install that published a pending pack uploads one sticker's WhatsApp-ready file,
+/// the one its phone already prepared. Files are named by content, so a retry or a corrected
+/// file never overwrites what another pack points at.
+pub async fn upload_sticker_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((id, emote_id)): Path<(i32, String)>,
+    Query(params): Query<DeviceQuery>,
+    body: Bytes,
+) -> (StatusCode, Json<UploadResponse>) {
+    if !valid_device_id(&params.device_id) {
+        return upload_error(StatusCode::BAD_REQUEST, "Invalid device id");
+    }
+    if !valid_emote_id(&emote_id) {
+        return upload_error(StatusCode::BAD_REQUEST, "Invalid sticker id");
+    }
+    if over_rate_limit(&state, "community_uploads", &headers, UPLOAD_RATE_LIMIT).await {
+        return upload_error(StatusCode::TOO_MANY_REQUESTS, "Too many uploads, try again later");
+    }
+    if !state.storage.can_upload() {
+        return upload_error(StatusCode::SERVICE_UNAVAILABLE, "File storage is not available");
+    }
+
+    let pack: Result<Option<(String, String, bool)>, sqlx::Error> =
+        sqlx::query_as("SELECT device_id, status, animated FROM community_packs WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await;
+    let animated = match pack {
+        Ok(None) => return upload_error(StatusCode::NOT_FOUND, "Pack not found"),
+        Ok(Some((device_id, _, _))) if device_id != params.device_id => {
+            return upload_error(StatusCode::FORBIDDEN, "Only the publisher can upload this pack's stickers")
+        }
+        Ok(Some((_, status, _))) if status != "pending" => {
+            return upload_error(StatusCode::CONFLICT, "This pack is no longer waiting for review")
+        }
+        Ok(Some((_, _, animated))) => animated,
+        Err(e) => {
+            tracing::error!("Failed to load community pack {} for an upload: {:?}", id, e);
+            return upload_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error");
+        }
+    };
+    if let Err(message) = validate_sticker(&body, animated) {
+        return upload_error(StatusCode::BAD_REQUEST, message);
+    }
+
+    let blob_name = format!("community/{id}/{emote_id}-{}.webp", short_sha256(&body, 8));
+    let byte_count = body.len() as i32;
+    let sticker_url = match state.storage.upload_blob(body.to_vec(), &blob_name, "image/webp").await {
+        Ok(url) => url,
+        Err(e) => {
+            tracing::error!("Failed to store a sticker for community pack {}: {:?}", id, e);
+            return upload_error(StatusCode::BAD_GATEWAY, "Could not store the sticker");
+        }
+    };
+
+    let updated = sqlx::query(
+        "UPDATE community_pack_items SET sticker_url = $3, sticker_bytes = $4
+         WHERE pack_id = $1 AND emote_id = $2",
+    )
+    .bind(id)
+    .bind(&emote_id)
+    .bind(&sticker_url)
+    .bind(byte_count)
+    .execute(&state.db)
+    .await;
+
+    match updated {
+        Ok(res) if res.rows_affected() == 0 => upload_error(StatusCode::NOT_FOUND, "Sticker is not in this pack"),
+        Ok(_) => (
+            StatusCode::OK,
+            Json(UploadResponse {
+                success: true,
+                sticker_url: Some(sticker_url),
+                message: None,
+            }),
+        ),
+        Err(e) => {
+            tracing::error!("Failed to save a sticker file for community pack {}: {:?}", id, e);
+            upload_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        }
+    }
+}
+
 fn simple(status: StatusCode, success: bool, message: Option<&str>) -> (StatusCode, Json<SimpleResponse>) {
     (
         status,
@@ -772,6 +907,29 @@ pub async fn admin_update_handler(
     if !valid_status(&input.status) {
         return simple(StatusCode::BAD_REQUEST, false, Some("Invalid status"));
     }
+    // Approved packs are downloaded as they are, so every sticker needs its uploaded file.
+    if input.status == "approved" {
+        let missing: Result<i64, sqlx::Error> = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM community_pack_items WHERE pack_id = $1 AND sticker_url IS NULL",
+        )
+        .bind(id)
+        .fetch_one(&state.db)
+        .await;
+        match missing {
+            Ok(0) => {}
+            Ok(_) => {
+                return simple(
+                    StatusCode::CONFLICT,
+                    false,
+                    Some("Some stickers haven't been uploaded yet"),
+                )
+            }
+            Err(e) => {
+                tracing::error!("Failed to check files of community pack {}: {:?}", id, e);
+                return simple(StatusCode::INTERNAL_SERVER_ERROR, false, Some("Database error"));
+            }
+        }
+    }
     let result = sqlx::query(
         "UPDATE community_packs
          SET status = $1,
@@ -789,6 +947,117 @@ pub async fn admin_update_handler(
         Err(e) => {
             tracing::error!("Failed to update community pack {}: {:?}", id, e);
             simple(StatusCode::INTERNAL_SERVER_ERROR, false, Some("Database error"))
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromoteResponse {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub starter_pack_id: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+fn promote_error(status: StatusCode, message: &str) -> (StatusCode, Json<PromoteResponse>) {
+    (
+        status,
+        Json(PromoteResponse {
+            success: false,
+            starter_pack_id: None,
+            message: Some(message.to_string()),
+        }),
+    )
+}
+
+#[derive(sqlx::FromRow)]
+struct PromotedItemRow {
+    emote_id: String,
+    emote_name: String,
+    sticker_url: Option<String>,
+}
+
+/// Admin: copies an approved community pack, uploaded files included, into a new ready-made
+/// pack. It starts as a draft so it can be renamed and given an emoji before publishing.
+pub async fn admin_promote_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i32>,
+) -> (StatusCode, Json<PromoteResponse>) {
+    let result: Result<Result<i32, (StatusCode, &'static str)>, sqlx::Error> = async {
+        let mut tx = state.db.begin().await?;
+        let pack: Option<(String, bool, String)> =
+            sqlx::query_as("SELECT name, animated, status FROM community_packs WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some((name, animated, status)) = pack else {
+            return Ok(Err((StatusCode::NOT_FOUND, "Pack not found")));
+        };
+        if status != "approved" {
+            return Ok(Err((StatusCode::CONFLICT, "Approve the pack first")));
+        }
+        let items = sqlx::query_as::<_, PromotedItemRow>(
+            "SELECT emote_id, emote_name, sticker_url
+             FROM community_pack_items WHERE pack_id = $1 ORDER BY position",
+        )
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await?;
+        if items.iter().any(|item| item.sticker_url.is_none()) {
+            return Ok(Err((StatusCode::CONFLICT, "Some stickers have no uploaded file")));
+        }
+
+        let starter_id: i32 = sqlx::query_scalar(
+            "INSERT INTO starter_packs (name, animated, published, position)
+             VALUES ($1, $2, false, (SELECT COALESCE(MAX(position) + 1, 0) FROM starter_packs))
+             RETURNING id",
+        )
+        .bind(&name)
+        .bind(animated)
+        .fetch_one(&mut *tx)
+        .await?;
+        for (position, item) in items.into_iter().enumerate() {
+            let emote = emote_response(item.emote_id, item.emote_name, animated);
+            sqlx::query(
+                "INSERT INTO starter_pack_items
+                     (pack_id, position, emote_id, emote_name, file_name, url, animated,
+                      animated_preview_url, poster_url, tags, sticker_url)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            )
+            .bind(starter_id)
+            .bind(position as i32)
+            .bind(&emote.emote_id)
+            .bind(&emote.emote_name)
+            .bind(&emote.file_name)
+            .bind(&emote.url)
+            .bind(animated)
+            .bind(&emote.animated_preview_url)
+            .bind(&emote.poster_url)
+            .bind(Vec::<String>::new())
+            .bind(&item.sticker_url)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(Ok(starter_id))
+    }
+    .await;
+
+    match result {
+        Ok(Ok(starter_id)) => (
+            StatusCode::OK,
+            Json(PromoteResponse {
+                success: true,
+                starter_pack_id: Some(starter_id),
+                message: None,
+            }),
+        ),
+        Ok(Err((status, message))) => promote_error(status, message),
+        Err(e) => {
+            tracing::error!("Failed to make community pack {} a ready-made pack: {:?}", id, e);
+            promote_error(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
         }
     }
 }
@@ -894,6 +1163,12 @@ mod tests {
         let mut pack = input(3);
         pack.device_id = "short".to_string();
         assert!(validate_publish(&pack).is_err());
+    }
+
+    #[test]
+    fn stored_files_are_named_by_content() {
+        assert_eq!(short_sha256(b"abc", 8), "ba7816bf8f01cfea");
+        assert_ne!(short_sha256(b"abc", 8), short_sha256(b"abd", 8));
     }
 
     #[test]

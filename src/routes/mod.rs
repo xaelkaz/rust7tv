@@ -3,8 +3,9 @@ use axum::{
     Router,
     Json,
     middleware,
-    extract::{State, Query, Path},
-    http::StatusCode,
+    extract::{DefaultBodyLimit, State, Query, Path},
+    http::{header, StatusCode},
+    response::{IntoResponse, Response},
 };
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
@@ -17,6 +18,7 @@ mod community_packs;
 mod creator_requests;
 mod dashboard;
 mod starter_packs;
+mod sticker_files;
 
 pub fn create_router(state: Arc<AppState>) -> Router {
     let public = Router::new()
@@ -53,7 +55,18 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/community-packs/:id/like",
             post(community_packs::set_like_handler),
+        )
+        .route(
+            "/api/community-packs/:id/stickers/:emote_id",
+            put(community_packs::upload_sticker_handler)
+                .layer(DefaultBodyLimit::max(community_packs::MAX_UPLOAD_BYTES)),
         );
+    // Development only: serves files the local storage stand-in wrote (`LOCAL_BLOB_DIR`).
+    let public = if state.storage.serves_local_blobs() {
+        public.route("/dev-blobs/*path", get(dev_blob_handler))
+    } else {
+        public
+    };
 
     let admin = Router::new()
         .route("/admin/dashboard", get(dashboard::dashboard_handler))
@@ -88,6 +101,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/admin/community-packs/:id",
             patch(community_packs::admin_update_handler).delete(community_packs::admin_delete_handler),
+        )
+        .route(
+            "/api/admin/community-packs/:id/promote",
+            post(community_packs::admin_promote_handler),
         )
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&state),
@@ -1138,4 +1155,16 @@ async fn delete_user_handler(
             },
         }),
     )
+}
+
+/// Development only: a file written by the local storage stand-in, or 404.
+async fn dev_blob_handler(State(state): State<Arc<AppState>>, Path(path): Path<String>) -> Response {
+    let Some(file) = state.storage.local_blob_path(&path) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let content_type = if path.ends_with(".webp") { "image/webp" } else { "application/octet-stream" };
+    match tokio::fs::read(&file).await {
+        Ok(bytes) => ([(header::CONTENT_TYPE, content_type)], bytes).into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
 }

@@ -636,6 +636,8 @@ mod tests {
             admin_token: String::new(),
             admin_user: String::new(),
             admin_password: String::new(),
+            local_blob_dir: String::new(),
+            public_base_url: String::new(),
         };
         let service = super::SevenTVService::new(Arc::new(StorageService::new(&config)));
 

@@ -269,9 +269,10 @@
                         </select>
                     </div>
                     <p class="text-xs text-gray-500 mb-4">
-                        Packs users published from the app. Approved packs show in the app's Community tab, most
-                        liked first. The author's app shows whether their pack is in review, published or not
-                        approved. Use "All" to find any pack and delete it.
+                        Packs users published from the app, with the WhatsApp-ready files their phone prepared; the
+                        stickers below are those files. A pack can be approved once every file is uploaded, and then
+                        shows in the app's Shared tab, most liked first. "Make ready-made" copies an approved pack,
+                        files included, into Starter Packs as a draft. Use "All" to find any pack and delete it.
                     </p>
                     <input type="text" id="communitySearch" placeholder="Search by pack name or author"
                         oninput="renderCommunityPacks()"
@@ -590,6 +591,13 @@
                 sub.textContent = `${author} · ${pack.emotes.length} ${kind} stickers · ` +
                     `sent ${formatRelative(pack.createdAt)} · ${pack.likeCount} likes · added by ${pack.addCount}`;
                 meta.append(topLine, sub);
+                const filesReady = pack.stickerFiles === pack.emotes.length;
+                if (!filesReady) {
+                    const files = document.createElement('div');
+                    files.className = 'text-xs text-yellow-400';
+                    files.textContent = `Uploading stickers: ${pack.stickerFiles}/${pack.emotes.length} files`;
+                    meta.appendChild(files);
+                }
 
                 const actions = document.createElement('div');
                 actions.className = 'flex gap-2 flex-shrink-0';
@@ -597,22 +605,34 @@
                 const red = 'bg-red-600/20 hover:bg-red-600 hover:text-white text-red-400 border border-red-600/40';
                 const gray = 'bg-gray-700 hover:bg-gray-600 text-white';
                 if (pack.status === 'pending') {
-                    actions.append(
-                        communityButton('Approve', green, () => updateCommunityPack(pack, 'approved')),
-                        communityButton('Reject', red, () => updateCommunityPack(pack, 'rejected')),
-                    );
+                    const approve = communityButton('Approve', green, () => updateCommunityPack(pack, 'approved'));
+                    // People download exactly these files, so a pack is approved only once all are in.
+                    if (!filesReady) {
+                        approve.disabled = true;
+                        approve.classList.add('opacity-40', 'cursor-not-allowed');
+                        approve.title = 'Waiting for the publisher\'s app to upload every sticker';
+                    }
+                    actions.append(approve, communityButton('Reject', red, () => updateCommunityPack(pack, 'rejected')));
                 } else if (pack.status === 'approved') {
-                    actions.appendChild(communityButton('Unpublish', gray, () => updateCommunityPack(pack, 'rejected')));
+                    actions.append(
+                        communityButton('Make ready-made', green, () => promoteCommunityPack(pack)),
+                        communityButton('Unpublish', gray, () => updateCommunityPack(pack, 'rejected')),
+                    );
                 } else {
                     actions.appendChild(communityButton('Reopen', gray, () => updateCommunityPack(pack, 'pending')));
                 }
                 actions.appendChild(communityButton('Delete', red, () => deleteCommunityPack(pack)));
                 header.append(meta, actions);
 
-                // Every sticker, so the whole pack can be reviewed before approving it.
+                // The files people will download, so what gets approved is exactly what they get.
+                // A sticker without its file yet shows the 7TV image, dimmed.
                 const stickers = document.createElement('div');
                 stickers.className = 'flex flex-wrap gap-1';
-                pack.emotes.forEach(e => stickers.appendChild(makeThumb(e, 'w-10 h-10')));
+                pack.emotes.forEach(e => {
+                    const thumb = makeThumb(e, 'w-12 h-12', e.stickerUrl);
+                    if (!e.stickerUrl) thumb.classList.add('opacity-30');
+                    stickers.appendChild(thumb);
+                });
 
                 row.append(header, stickers);
                 list.appendChild(row);
@@ -633,6 +653,22 @@
                 refreshCommunityBadge();
             } catch (err) {
                 log(`Could not update ${escapeHtml(pack.name)}: ${escapeHtml(err.message)}`, 'error');
+            }
+        }
+
+        async function promoteCommunityPack(pack) {
+            const ok = window.confirm(
+                `Make "${pack.name}" a ready-made pack?\n\nIt's added to Starter Packs as a draft with the ` +
+                `same stickers and files. Publish it there when it's ready.`
+            );
+            if (!ok) return;
+            try {
+                const response = await fetch('/api/admin/community-packs/' + pack.id + '/promote', { method: 'POST' });
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.message || response.status);
+                log(`<b>${escapeHtml(pack.name)}</b> added to Starter Packs as a draft`, 'success');
+            } catch (err) {
+                log(`Could not make ${escapeHtml(pack.name)} a ready-made pack: ${escapeHtml(err.message)}`, 'error');
             }
         }
 
@@ -667,11 +703,11 @@
             return (emote.animated ? emote.animatedPreviewUrl : emote.posterUrl) || emote.url;
         }
 
-        function makeThumb(emote, sizeClass) {
+        function makeThumb(emote, sizeClass, src) {
             const box = document.createElement('div');
             box.className = `${sizeClass} rounded-lg bg-gray-900/60 border border-gray-800 flex items-center justify-center overflow-hidden`;
             const img = document.createElement('img');
-            img.src = starterThumbUrl(emote);
+            img.src = src || starterThumbUrl(emote);
             img.alt = emote.emoteName;
             img.title = emote.emoteName;
             img.loading = 'lazy';
@@ -784,6 +820,8 @@
                     animatedPreviewUrl: e.animatedPreviewUrl || null,
                     posterUrl: e.posterUrl || null,
                     tags: e.tags || [],
+                    // Kept from a community pack: the WhatsApp-ready file people download.
+                    stickerUrl: e.stickerUrl || null,
                 })),
             };
         }

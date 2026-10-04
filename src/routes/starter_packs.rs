@@ -1,8 +1,9 @@
 //! Starter packs: curated sets of stickers the app offers with a one-tap
 //! "Add to WhatsApp", so new users don't have to collect three stickers first.
 //!
-//! The admin builds them in the dashboard from search results; each emote is
-//! stored as a snapshot. Only published packs are served to the app, in the
+//! The admin builds them in the dashboard from search results, or makes one from
+//! an approved community pack (which keeps its WhatsApp-ready files); each emote
+//! is stored as a snapshot. Only published packs are served to the app, in the
 //! order set in the dashboard.
 
 use axum::{
@@ -14,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::models::EmoteResponse;
+use crate::models::{EmoteResponse, PackEmote};
 use crate::AppState;
 
 /// WhatsApp rejects packs with fewer stickers than this.
@@ -45,6 +46,8 @@ pub struct StarterPackEmoteInput {
     pub animated_preview_url: Option<String>,
     pub poster_url: Option<String>,
     pub tags: Option<Vec<String>>,
+    /// WhatsApp-ready file kept from a community pack; sent back as-is when the pack is edited.
+    pub sticker_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -56,7 +59,7 @@ pub struct StarterPack {
     pub animated: bool,
     pub published: bool,
     pub position: i32,
-    pub emotes: Vec<EmoteResponse>,
+    pub emotes: Vec<PackEmote>,
 }
 
 #[derive(Debug, Serialize)]
@@ -109,6 +112,7 @@ struct ItemRow {
     animated_preview_url: Option<String>,
     poster_url: Option<String>,
     tags: Vec<String>,
+    sticker_url: Option<String>,
 }
 
 /// Checks a pack before saving. Drafts may be empty; published packs must satisfy WhatsApp.
@@ -146,6 +150,11 @@ pub fn validate_pack(input: &StarterPackInput) -> Result<(), String> {
         }
         if !emote.url.starts_with("https://") {
             return Err(format!("\"{}\" has an invalid image URL", emote.emote_name));
+        }
+        if let Some(sticker_url) = &emote.sticker_url {
+            if !sticker_url.starts_with("https://") || sticker_url.len() > 500 {
+                return Err(format!("\"{}\" has an invalid sticker file URL", emote.emote_name));
+            }
         }
         if !seen.insert(emote.emote_id.as_str()) {
             return Err(format!("\"{}\" is in the pack twice", emote.emote_name));
@@ -187,7 +196,7 @@ async fn load_packs(
     let ids: Vec<i32> = packs.iter().map(|p| p.id).collect();
     let items = sqlx::query_as::<_, ItemRow>(
         "SELECT pack_id, emote_id, emote_name, file_name, url, animated,
-                animated_preview_url, poster_url, tags
+                animated_preview_url, poster_url, tags, sticker_url
          FROM starter_pack_items
          WHERE pack_id = ANY($1)
          ORDER BY pack_id, position",
@@ -196,20 +205,23 @@ async fn load_packs(
     .fetch_all(db)
     .await?;
 
-    let mut by_pack: HashMap<i32, Vec<EmoteResponse>> = HashMap::new();
+    let mut by_pack: HashMap<i32, Vec<PackEmote>> = HashMap::new();
     for item in items {
-        by_pack.entry(item.pack_id).or_default().push(EmoteResponse {
-            file_name: item.file_name,
-            url: item.url,
-            animated_preview_url: item.animated_preview_url,
-            poster_url: item.poster_url,
-            emote_id: item.emote_id,
-            emote_name: item.emote_name,
-            owner: None,
-            animated: Some(item.animated),
-            scale: None,
-            mime: None,
-            tags: Some(item.tags),
+        by_pack.entry(item.pack_id).or_default().push(PackEmote {
+            emote: EmoteResponse {
+                file_name: item.file_name,
+                url: item.url,
+                animated_preview_url: item.animated_preview_url,
+                poster_url: item.poster_url,
+                emote_id: item.emote_id,
+                emote_name: item.emote_name,
+                owner: None,
+                animated: Some(item.animated),
+                scale: None,
+                mime: None,
+                tags: Some(item.tags),
+            },
+            sticker_url: item.sticker_url,
         });
     }
 
@@ -240,8 +252,8 @@ async fn replace_items(
         sqlx::query(
             "INSERT INTO starter_pack_items
                  (pack_id, position, emote_id, emote_name, file_name, url, animated,
-                  animated_preview_url, poster_url, tags)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                  animated_preview_url, poster_url, tags, sticker_url)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         )
         .bind(pack_id)
         .bind(position as i32)
@@ -253,6 +265,7 @@ async fn replace_items(
         .bind(&emote.animated_preview_url)
         .bind(&emote.poster_url)
         .bind(emote.tags.clone().unwrap_or_default())
+        .bind(&emote.sticker_url)
         .execute(&mut **tx)
         .await?;
     }
@@ -514,6 +527,7 @@ mod tests {
             animated_preview_url: None,
             poster_url: None,
             tags: None,
+            sticker_url: None,
         }
     }
 
@@ -552,6 +566,10 @@ mod tests {
         let mut insecure = emote("b", true);
         insecure.url = "http://cdn.example/b.webp".to_string();
         assert!(validate_pack(&pack(false, vec![insecure])).is_err());
+
+        let mut insecure_file = emote("c", true);
+        insecure_file.sticker_url = Some("http://files.example/c.webp".to_string());
+        assert!(validate_pack(&pack(false, vec![insecure_file])).is_err());
     }
 
     #[test]
