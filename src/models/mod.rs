@@ -1,5 +1,14 @@
 use serde::{Deserialize, Serialize};
 
+/// An emote in a ready-made or community pack, with its WhatsApp-ready file when one was uploaded.
+#[derive(Debug, Serialize)]
+pub struct PackEmote {
+    #[serde(flatten)]
+    pub emote: EmoteResponse,
+    #[serde(rename = "stickerUrl", skip_serializing_if = "Option::is_none")]
+    pub sticker_url: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct EmoteResponse {

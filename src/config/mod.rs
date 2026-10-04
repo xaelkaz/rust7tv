@@ -20,6 +20,11 @@ pub struct Config {
     pub admin_token: String,
     pub admin_user: String,
     pub admin_password: String,
+    /// Development only: without Azure, uploaded files go to this folder and are served at
+    /// `/dev-blobs/`. Leave unset in production.
+    pub local_blob_dir: String,
+    /// Base URL for `/dev-blobs/` links, e.g. `http://10.0.2.2:18080` for the Android emulator.
+    pub public_base_url: String,
 }
 
 impl Config {
@@ -57,6 +62,8 @@ impl Config {
                 .expect("ADMIN_USER must be set (required for /admin/dashboard basic auth)"),
             admin_password: env::var("ADMIN_PASSWORD")
                 .expect("ADMIN_PASSWORD must be set (required for /admin/dashboard basic auth)"),
+            local_blob_dir: env::var("LOCAL_BLOB_DIR").unwrap_or_default(),
+            public_base_url: env::var("PUBLIC_BASE_URL").unwrap_or_default(),
         }
     }
 }

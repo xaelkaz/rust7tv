@@ -2,6 +2,7 @@ use azure_core::prelude::IfMatchCondition;
 use azure_core::StatusCode;
 use azure_storage::StorageCredentials;
 use azure_storage_blobs::prelude::*;
+use std::path::PathBuf;
 use std::sync::Arc;
 use crate::config::Config;
 
@@ -9,15 +10,36 @@ pub struct StorageService {
     client: Option<Arc<BlobServiceClient>>,
     container_name: String,
     account_name: String,
+    /// Development only (`LOCAL_BLOB_DIR`): stands in for Azure when it isn't configured.
+    local: Option<LocalBlobs>,
+}
+
+struct LocalBlobs {
+    dir: PathBuf,
+    base_url: String,
+}
+
+/// Blob names are relative paths of plain characters, so a local blob can't escape its folder.
+pub fn valid_blob_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 200
+        && !name.starts_with('/')
+        && !name.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))
 }
 
 impl StorageService {
     pub fn new(cfg: &Config) -> Self {
+        let local = (!cfg.local_blob_dir.is_empty()).then(|| LocalBlobs {
+            dir: PathBuf::from(&cfg.local_blob_dir),
+            base_url: cfg.public_base_url.trim_end_matches('/').to_string(),
+        });
         if cfg.azure_conn_str.is_empty() {
             return Self {
                 client: None,
                 container_name: cfg.container_name.clone(),
                 account_name: String::new(),
+                local,
             };
         }
 
@@ -39,6 +61,7 @@ impl StorageService {
                 client: None,
                 container_name: cfg.container_name.clone(),
                 account_name,
+                local,
             };
         }
 
@@ -49,11 +72,27 @@ impl StorageService {
             client: Some(Arc::new(client)),
             container_name: cfg.container_name.clone(),
             account_name,
+            local: None,
         }
     }
 
     pub fn is_available(&self) -> bool {
         self.client.is_some()
+    }
+
+    /// Whether `upload_blob` can store files: Azure, or the local development folder.
+    pub fn can_upload(&self) -> bool {
+        self.client.is_some() || self.local.is_some()
+    }
+
+    /// Where a local development blob lives on disk; None outside development or for bad names.
+    pub fn local_blob_path(&self, blob_name: &str) -> Option<PathBuf> {
+        let local = self.local.as_ref()?;
+        valid_blob_name(blob_name).then(|| local.dir.join(blob_name))
+    }
+
+    pub fn serves_local_blobs(&self) -> bool {
+        self.local.is_some()
     }
 
     pub fn get_container_url(&self) -> String {
@@ -66,6 +105,11 @@ impl StorageService {
         blob_name: &str,
         content_type: &str,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        if self.client.is_none() {
+            if let Some(local) = &self.local {
+                return upload_local(local, data, blob_name).await;
+            }
+        }
         let client = self.client.as_ref().ok_or("Azure Storage not initialized")?;
         let container_client = client.container_client(&self.container_name);
         let blob_client = container_client.blob_client(blob_name);
@@ -154,5 +198,40 @@ impl StorageService {
 
         let data = blob_client.get_content().await?;
         Ok(data)
+    }
+}
+
+/// Same contract as the Azure upload: the first write wins and later ones return the same URL.
+async fn upload_local(
+    local: &LocalBlobs,
+    data: Vec<u8>,
+    blob_name: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    if !valid_blob_name(blob_name) {
+        return Err("Invalid blob name".into());
+    }
+    let path = local.dir.join(blob_name);
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(&path, data).await?;
+    }
+    Ok(format!("{}/dev-blobs/{}", local.base_url, blob_name))
+}
+
+#[cfg(test)]
+mod local_blob_tests {
+    use super::valid_blob_name;
+
+    #[test]
+    fn blob_names_stay_inside_their_folder() {
+        assert!(valid_blob_name("community/12/01ABC-0f1e2d3c4b5a6978.webp"));
+        assert!(!valid_blob_name("../secrets"));
+        assert!(!valid_blob_name("community/../../etc/passwd"));
+        assert!(!valid_blob_name("/etc/passwd"));
+        assert!(!valid_blob_name("community//x.webp"));
+        assert!(!valid_blob_name("community/x y.webp"));
+        assert!(!valid_blob_name(""));
     }
 }
