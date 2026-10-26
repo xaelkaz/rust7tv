@@ -7,8 +7,8 @@ use axum::{
     http::{header, StatusCode},
     response::{IntoResponse, Response},
 };
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, PoisonError};
 use tower_http::cors::{Any, CorsLayer};
 use crate::AppState;
 use crate::models::{TrendingPeriod, SearchResponse, SyncTrendingRequest, SyncUserEmotesRequest, UpdateUserImageRequest, EmoteResponse, TrendingTagResponse, TrendingTag};
@@ -122,6 +122,34 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .merge(admin)
         .layer(cors)
         .with_state(state)
+}
+
+/// Creators whose sync is running. A sync keeps going after its request is dropped, so this
+/// keeps a second one for the same creator from racing it.
+#[derive(Default)]
+pub struct RunningUserSyncs(Mutex<HashSet<String>>);
+
+/// Marks a creator's sync as running until it's dropped.
+pub struct UserSyncGuard {
+    syncs: Arc<RunningUserSyncs>,
+    folder: String,
+}
+
+impl RunningUserSyncs {
+    /// None while another sync of `folder` is running.
+    pub fn begin(syncs: &Arc<Self>, folder: &str) -> Option<UserSyncGuard> {
+        let mut running = syncs.0.lock().unwrap_or_else(PoisonError::into_inner);
+        running.insert(folder.to_string()).then(|| UserSyncGuard {
+            syncs: Arc::clone(syncs),
+            folder: folder.to_string(),
+        })
+    }
+}
+
+impl Drop for UserSyncGuard {
+    fn drop(&mut self) {
+        self.syncs.0.lock().unwrap_or_else(PoisonError::into_inner).remove(&self.folder);
+    }
 }
 
 /// Folder names are used as Azure blob prefixes and as SQL bind params.
@@ -728,7 +756,37 @@ async fn sync_user_emotes_handler(
         Err(message) => return user_sync_failed(StatusCode::BAD_REQUEST, message.to_string()),
     };
 
-    let set = match state.seventv.fetch_user_emotes(&user_id).await {
+    let Some(guard) = RunningUserSyncs::begin(&state.user_syncs, &folder) else {
+        return user_sync_failed(
+            StatusCode::CONFLICT,
+            format!("A sync for {} is already running; it finishes on its own", folder),
+        );
+    };
+
+    // A big set takes minutes to sync. It runs in its own task so it still finishes and saves
+    // when the dashboard or a proxy drops this request.
+    let sync = tokio::spawn(async move {
+        let _running = guard;
+        sync_user_emotes(&state, &user_id, &folder, image_url).await
+    });
+    sync.await.unwrap_or_else(|e| {
+        tracing::error!("User sync task failed: {:?}", e);
+        user_sync_failed(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "The sync stopped unexpectedly; see the server logs".to_string(),
+        )
+    })
+}
+
+/// Mirrors the user's active 7TV set into `folder`.
+async fn sync_user_emotes(
+    state: &AppState,
+    user_id: &str,
+    folder: &str,
+    image_url: Option<String>,
+) -> (StatusCode, Json<SearchResponse>) {
+    tracing::info!("User sync for {} started", folder);
+    let set = match state.seventv.fetch_user_emotes(user_id).await {
         Ok(set) => set,
         Err(e) => {
             tracing::error!("Failed to sync user emotes: {:?}", e);
@@ -744,7 +802,7 @@ async fn sync_user_emotes_handler(
     }
 
     let set_ids: Vec<String> = set.emotes.iter().map(|e| e.id.clone()).collect();
-    let processed = state.seventv.process_emotes_batch(set.emotes, &folder).await;
+    let processed = state.seventv.process_emotes_batch(set.emotes, folder).await;
     if processed.is_empty() {
         return user_sync_failed(
             StatusCode::BAD_GATEWAY,
@@ -760,11 +818,11 @@ async fn sync_user_emotes_handler(
         tracing::error!("Failed to save synced user emotes to cache: {:?}", e);
     }
 
-    let display_name = set.display_name.unwrap_or_else(|| folder.clone());
+    let display_name = set.display_name.unwrap_or_else(|| folder.to_string());
     let removed = match persist_user_emotes(
         &state.db,
-        &user_id,
-        &folder,
+        user_id,
+        folder,
         &display_name,
         image_url.as_deref(),
         &processed,
@@ -779,7 +837,7 @@ async fn sync_user_emotes_handler(
         }
     };
 
-    creator_requests::approve_matching_request(&state.db, &folder).await;
+    creator_requests::approve_matching_request(&state.db, folder).await;
 
     let summary = user_sync_summary(
         &set.set_name,
@@ -1188,7 +1246,20 @@ async fn dev_blob_handler(State(state): State<Arc<AppState>>, Path(path): Path<S
 
 #[cfg(test)]
 mod tests {
-    use super::user_sync_summary;
+    use super::{user_sync_summary, RunningUserSyncs};
+    use std::sync::Arc;
+
+    #[test]
+    fn a_creator_syncs_once_at_a_time() {
+        let syncs = Arc::new(RunningUserSyncs::default());
+
+        let running = RunningUserSyncs::begin(&syncs, "xQc").expect("the first sync starts");
+        assert!(RunningUserSyncs::begin(&syncs, "xQc").is_none());
+        assert!(RunningUserSyncs::begin(&syncs, "Vinesauce").is_some());
+
+        drop(running);
+        assert!(RunningUserSyncs::begin(&syncs, "xQc").is_some());
+    }
 
     #[test]
     fn user_sync_summary_mentions_only_what_happened() {

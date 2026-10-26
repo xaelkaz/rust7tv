@@ -1391,6 +1391,12 @@
             }
         }
 
+        // The server keeps syncing a user after the request is cut (proxy timeout, closed tab).
+        function userSyncDroppedMessage(folderName, err) {
+            return `Lost the request for <b>${escapeHtml(folderName)}</b> (${escapeHtml(err.message)}). ` +
+                'If the sync had started, it keeps running on the server: refresh the list in a few minutes.';
+        }
+
         async function resyncUser(folderName, userId, imageUrl) {
             const startTime = Date.now();
             log(`Re-syncing <b>${folderName}</b>...`, 'loading');
@@ -1405,11 +1411,13 @@
                 if (response.ok && data.success) {
                     log(`Re-sync done for <b>${folderName}</b>: ${escapeHtml(data.message)} (${duration}s)`, 'success');
                     loadUsersList();
+                } else if (response.status === 409) {
+                    log(escapeHtml(data.message), 'info');
                 } else {
                     log(`Re-sync failed: ${escapeHtml(data.message || 'Unknown error')}`, 'error');
                 }
             } catch (err) {
-                log(`Network Error: ${err.message}`, 'error');
+                log(userSyncDroppedMessage(folderName, err), 'error');
             }
         }
 
@@ -1563,11 +1571,13 @@
                     loadUsersList();
                     // Syncing approves a matching request server side.
                     refreshRequestsBadge();
+                } else if (response.status === 409) {
+                    log(escapeHtml(data.message), 'info');
                 } else {
                     log(`❌ User Sync Failed: ${escapeHtml(data.message || 'Unknown error')}`, 'error');
                 }
             } catch (err) {
-                log(`Network Error: ${err.message}`, 'error');
+                log(userSyncDroppedMessage(folderName, err), 'error');
             }
         }
 
