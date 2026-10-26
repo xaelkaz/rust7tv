@@ -7,7 +7,8 @@ use axum::{
     http::{header, StatusCode},
     response::{IntoResponse, Response},
 };
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, PoisonError};
 use tower_http::cors::{Any, CorsLayer};
 use crate::AppState;
 use crate::models::{TrendingPeriod, SearchResponse, SyncTrendingRequest, SyncUserEmotesRequest, UpdateUserImageRequest, EmoteResponse, TrendingTagResponse, TrendingTag};
@@ -123,6 +124,34 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
+/// Creators whose sync is running. A sync keeps going after its request is dropped, so this
+/// keeps a second one for the same creator from racing it.
+#[derive(Default)]
+pub struct RunningUserSyncs(Mutex<HashSet<String>>);
+
+/// Marks a creator's sync as running until it's dropped.
+pub struct UserSyncGuard {
+    syncs: Arc<RunningUserSyncs>,
+    folder: String,
+}
+
+impl RunningUserSyncs {
+    /// None while another sync of `folder` is running.
+    pub fn begin(syncs: &Arc<Self>, folder: &str) -> Option<UserSyncGuard> {
+        let mut running = syncs.0.lock().unwrap_or_else(PoisonError::into_inner);
+        running.insert(folder.to_string()).then(|| UserSyncGuard {
+            syncs: Arc::clone(syncs),
+            folder: folder.to_string(),
+        })
+    }
+}
+
+impl Drop for UserSyncGuard {
+    fn drop(&mut self) {
+        self.syncs.0.lock().unwrap_or_else(PoisonError::into_inner).remove(&self.folder);
+    }
+}
+
 /// Folder names are used as Azure blob prefixes and as SQL bind params.
 /// Restrict to a safe ASCII subset so an empty/malicious value can't wipe the
 /// whole container (e.g. `folder_name=""` → `prefix="/"` would list all blobs).
@@ -191,7 +220,11 @@ async fn persist_trending_stickers(
     Ok(())
 }
 
-/// Upsert the user record and all of their stickers atomically.
+/// Mirror the user's set atomically: upsert their stickers, delete the ones whose emote isn't in
+/// `set_ids` any more (it left the set, or is skipped now, like zero-width ones), then upsert the
+/// user record with the resulting count. Returns how many stickers were deleted.
+///
+/// An emote still in the set whose image failed to download keeps its previous sticker.
 async fn persist_user_emotes(
     pool: &sqlx::PgPool,
     user_id: &str,
@@ -199,13 +232,58 @@ async fn persist_user_emotes(
     display_name: &str,
     image_url: Option<&str>,
     emotes: &[EmoteResponse],
-) -> Result<(), sqlx::Error> {
+    set_ids: &[String],
+) -> Result<u64, sqlx::Error> {
     let mut tx = pool.begin().await?;
+
+    if !emotes.is_empty() {
+        // Where each emote sits in the set, so they're served in the channel's order.
+        let positions: HashMap<&str, i32> = set_ids
+            .iter()
+            .enumerate()
+            .map(|(position, id)| (id.as_str(), position as i32))
+            .collect();
+        let mut qb = sqlx::QueryBuilder::new(
+            "INSERT INTO stickers (seven_tv_id, emote_name, file_name, url, owner_name, tags, animated, folder_name, position) ",
+        );
+        qb.push_values(emotes, |mut b, emote| {
+            b.push_bind(&emote.emote_id)
+                .push_bind(&emote.emote_name)
+                .push_bind(&emote.file_name)
+                .push_bind(&emote.url)
+                .push_bind(&emote.owner)
+                .push_bind(&emote.tags)
+                .push_bind(emote.animated.unwrap_or(false))
+                .push_bind(folder)
+                .push_bind(positions.get(emote.emote_id.as_str()).copied());
+        });
+        qb.push(
+            " ON CONFLICT (seven_tv_id, folder_name) DO UPDATE SET \
+             emote_name = EXCLUDED.emote_name, \
+             file_name = EXCLUDED.file_name, \
+             url = EXCLUDED.url, \
+             owner_name = EXCLUDED.owner_name, \
+             tags = EXCLUDED.tags, \
+             animated = EXCLUDED.animated, \
+             position = EXCLUDED.position",
+        );
+        qb.build().execute(&mut *tx).await?;
+    }
+
+    // Only the rows go: their blobs stay, so stickers people already saved keep working.
+    let removed = sqlx::query(
+        "DELETE FROM stickers WHERE folder_name = $1 AND NOT (seven_tv_id = ANY($2))",
+    )
+    .bind(folder)
+    .bind(set_ids)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
 
     sqlx::query(
         r#"
         INSERT INTO users (seven_tv_id, folder_name, display_name, image_url, last_synced_at, emote_count)
-        VALUES ($1, $2, $3, $4, NOW(), $5)
+        VALUES ($1, $2, $3, $4, NOW(), (SELECT COUNT(*)::int FROM stickers WHERE folder_name = $2))
         ON CONFLICT (folder_name)
         DO UPDATE SET
             seven_tv_id = EXCLUDED.seven_tv_id,
@@ -219,38 +297,45 @@ async fn persist_user_emotes(
     .bind(folder)
     .bind(display_name)
     .bind(image_url)
-    .bind(emotes.len() as i32)
     .execute(&mut *tx)
     .await?;
 
-    if !emotes.is_empty() {
-        let mut qb = sqlx::QueryBuilder::new(
-            "INSERT INTO stickers (seven_tv_id, emote_name, file_name, url, owner_name, tags, animated, folder_name) ",
-        );
-        qb.push_values(emotes, |mut b, emote| {
-            b.push_bind(&emote.emote_id)
-                .push_bind(&emote.emote_name)
-                .push_bind(&emote.file_name)
-                .push_bind(&emote.url)
-                .push_bind(&emote.owner)
-                .push_bind(&emote.tags)
-                .push_bind(emote.animated.unwrap_or(false))
-                .push_bind(folder);
-        });
-        qb.push(
-            " ON CONFLICT (seven_tv_id, folder_name) DO UPDATE SET \
-             emote_name = EXCLUDED.emote_name, \
-             file_name = EXCLUDED.file_name, \
-             url = EXCLUDED.url, \
-             owner_name = EXCLUDED.owner_name, \
-             tags = EXCLUDED.tags, \
-             animated = EXCLUDED.animated",
-        );
-        qb.build().execute(&mut *tx).await?;
-    }
-
     tx.commit().await?;
-    Ok(())
+    Ok(removed)
+}
+
+/// What a user sync did, for the dashboard log.
+fn user_sync_summary(set_name: &str, stored: usize, zero_width: usize, failed: usize, removed: u64) -> String {
+    let mut summary = format!("Synced {} emotes from the 7TV set \"{}\"", stored, set_name);
+    if zero_width > 0 {
+        summary.push_str(&format!(", skipped {} zero-width", zero_width));
+    }
+    if failed > 0 {
+        summary.push_str(&format!(", {} failed to download or store (see the server logs)", failed));
+    }
+    if removed > 0 {
+        let noun = if removed == 1 { "sticker" } else { "stickers" };
+        summary.push_str(&format!(", removed {} {} no longer in the set", removed, noun));
+    }
+    summary
+}
+
+fn user_sync_failed(status: StatusCode, message: String) -> (StatusCode, Json<SearchResponse>) {
+    (
+        status,
+        Json(SearchResponse {
+            success: false,
+            total_found: 0,
+            emotes: vec![],
+            message: Some(message),
+            cached: Some(false),
+            processing_time: None,
+            page: None,
+            total_pages: None,
+            results_per_page: None,
+            has_next_page: None,
+        }),
+    )
 }
 
 async fn root_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
@@ -656,138 +741,128 @@ async fn sync_user_emotes_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<SyncUserEmotesRequest>,
 ) -> (StatusCode, Json<SearchResponse>) {
-    let SyncUserEmotesRequest { user_id, limit, folder_name, image_url } = payload;
-    let limit = limit.unwrap_or(100);
+    let SyncUserEmotesRequest { user_id, folder_name, image_url } = payload;
     let folder = folder_name;
 
     if !valid_folder_name(&folder) {
-        return (
+        return user_sync_failed(
             StatusCode::BAD_REQUEST,
-            Json(SearchResponse {
-                success: false,
-                total_found: 0,
-                emotes: vec![],
-                message: Some(
-                    "Invalid folder_name: must be 1-64 chars of [A-Za-z0-9_-]".to_string(),
-                ),
-                cached: Some(false),
-                processing_time: None,
-                page: None,
-                total_pages: None,
-                results_per_page: None,
-                has_next_page: None,
-            }),
+            "Invalid folder_name: must be 1-64 chars of [A-Za-z0-9_-]".to_string(),
         );
     }
 
     let image_url = match normalize_image_url(image_url) {
         Ok(image_url) => image_url,
-        Err(message) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(SearchResponse {
-                    success: false,
-                    total_found: 0,
-                    emotes: vec![],
-                    message: Some(message.to_string()),
-                    cached: Some(false),
-                    processing_time: None,
-                    page: None,
-                    total_pages: None,
-                    results_per_page: None,
-                    has_next_page: None,
-                }),
-            );
+        Err(message) => return user_sync_failed(StatusCode::BAD_REQUEST, message.to_string()),
+    };
+
+    let Some(guard) = RunningUserSyncs::begin(&state.user_syncs, &folder) else {
+        return user_sync_failed(
+            StatusCode::CONFLICT,
+            format!("A sync for {} is already running; it finishes on its own", folder),
+        );
+    };
+
+    // A big set takes minutes to sync. It runs in its own task so it still finishes and saves
+    // when the dashboard or a proxy drops this request.
+    let sync = tokio::spawn(async move {
+        let _running = guard;
+        sync_user_emotes(&state, &user_id, &folder, image_url).await
+    });
+    sync.await.unwrap_or_else(|e| {
+        tracing::error!("User sync task failed: {:?}", e);
+        user_sync_failed(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "The sync stopped unexpectedly; see the server logs".to_string(),
+        )
+    })
+}
+
+/// Mirrors the user's active 7TV set into `folder`.
+async fn sync_user_emotes(
+    state: &AppState,
+    user_id: &str,
+    folder: &str,
+    image_url: Option<String>,
+) -> (StatusCode, Json<SearchResponse>) {
+    tracing::info!("User sync for {} started", folder);
+    let set = match state.seventv.fetch_user_emotes(user_id).await {
+        Ok(set) => set,
+        Err(e) => {
+            tracing::error!("Failed to sync user emotes: {:?}", e);
+            return user_sync_failed(StatusCode::BAD_GATEWAY, e.to_string());
+        }
+    };
+    // Syncing an empty result would delete every sticker the user has.
+    if set.emotes.is_empty() {
+        return user_sync_failed(
+            StatusCode::BAD_GATEWAY,
+            format!("7TV returned no emotes in the set \"{}\"; nothing was changed", set.set_name),
+        );
+    }
+
+    let set_ids: Vec<String> = set.emotes.iter().map(|e| e.id.clone()).collect();
+    let processed = state.seventv.process_emotes_batch(set.emotes, folder).await;
+    if processed.is_empty() {
+        return user_sync_failed(
+            StatusCode::BAD_GATEWAY,
+            format!("None of the {} emotes could be downloaded and stored; nothing was changed", set_ids.len()),
+        );
+    }
+
+    // Save to Redis with a custom key: "user_emotes:{folder_name}"
+    let cache_key = format!("user_emotes:{}", folder);
+    let ttl = 86400 * 30; // 30 days retention for user syncs? or indefinite?
+
+    if let Err(e) = state.cache.save_to_cache(&cache_key, &processed, ttl).await {
+        tracing::error!("Failed to save synced user emotes to cache: {:?}", e);
+    }
+
+    let display_name = set.display_name.unwrap_or_else(|| folder.to_string());
+    let removed = match persist_user_emotes(
+        &state.db,
+        user_id,
+        folder,
+        &display_name,
+        image_url.as_deref(),
+        &processed,
+        &set_ids,
+    )
+    .await
+    {
+        Ok(removed) => removed,
+        Err(e) => {
+            tracing::error!("Failed to persist user emotes (rolled back): {:?}", e);
+            return user_sync_failed(StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e));
         }
     };
 
-    // Removed: We no longer cleanup existing blobs in that user folder to prevent breaking user favorites.
-    // The ON CONFLICT DO UPDATE handles database logical cleanup and override.
+    creator_requests::approve_matching_request(&state.db, folder).await;
 
-    match state.seventv.fetch_user_emotes(&user_id, limit).await {
-        Ok(emotes) => {
-            let processed = state.seventv.process_emotes_batch(emotes, &folder).await;
-            
-            // Save to Redis with a custom key: "user_emotes:{folder_name}"
-            let cache_key = format!("user_emotes:{}", folder);
-            let ttl = 86400 * 30; // 30 days retention for user syncs? or indefinite?
-            
-            if let Err(e) = state.cache.save_to_cache(&cache_key, &processed, ttl).await {
-                tracing::error!("Failed to save synced user emotes to cache: {:?}", e);
-            }
+    let summary = user_sync_summary(
+        &set.set_name,
+        processed.len(),
+        set.skipped_zero_width,
+        set_ids.len() - processed.len(),
+        removed,
+    );
+    tracing::info!("User sync for {}: {}", folder, summary);
 
-            // Update Database
-            let user_display_name = if let Some(first_emote) = processed.first() {
-                first_emote.owner.clone().unwrap_or_else(|| "Unknown".to_string())
-            } else {
-                "Unknown".to_string()
-            };
-
-            if let Err(e) = persist_user_emotes(
-                &state.db,
-                &user_id,
-                &folder,
-                &user_display_name,
-                image_url.as_deref(),
-                &processed,
-            )
-            .await
-            {
-                tracing::error!("Failed to persist user emotes (rolled back): {:?}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(SearchResponse {
-                        success: false,
-                        total_found: 0,
-                        emotes: vec![],
-                        message: Some(format!("Database error: {}", e)),
-                        cached: Some(false),
-                        processing_time: None,
-                        page: None,
-                        total_pages: None,
-                        results_per_page: None,
-                        has_next_page: None,
-                    }),
-                );
-            }
-
-            creator_requests::approve_matching_request(&state.db, &folder).await;
-
-            (
-                StatusCode::OK,
-                Json(SearchResponse {
-                    success: true,
-                    total_found: processed.len() as i32,
-                    emotes: processed,
-                    message: Some("User emotes synced successfully".to_string()),
-                    cached: Some(false),
-                    processing_time: None,
-                    page: Some(1),
-                    total_pages: Some(1),
-                    results_per_page: Some(limit),
-                    has_next_page: Some(false),
-                }),
-            )
-        },
-        Err(e) => {
-            tracing::error!("Failed to sync user emotes: {:?}", e);
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(SearchResponse {
-                    success: false,
-                    total_found: 0,
-                    emotes: vec![],
-                    message: Some(e.to_string()),
-                    cached: Some(false),
-                    processing_time: None,
-                    page: None,
-                    total_pages: None,
-                    results_per_page: None,
-                    has_next_page: None,
-                }),
-            )
-        }
-    }
+    (
+        StatusCode::OK,
+        Json(SearchResponse {
+            success: true,
+            total_found: processed.len() as i32,
+            emotes: processed,
+            message: Some(summary),
+            cached: Some(false),
+            processing_time: None,
+            page: Some(1),
+            total_pages: Some(1),
+            results_per_page: None,
+            has_next_page: Some(false),
+        }),
+    )
 }
 
 async fn get_saved_user_emotes_handler(
@@ -821,9 +896,9 @@ async fn get_saved_user_emotes_handler(
         }
     };
     
-    // Query stickers from database
+    // In the channel's set order; stickers synced before positions were stored come last.
     let rows = sqlx::query_as::<_, StickerRow>(
-        "SELECT seven_tv_id, emote_name, file_name, url, owner_name, tags, animated FROM stickers WHERE folder_name = $1 LIMIT $2"
+        "SELECT seven_tv_id, emote_name, file_name, url, owner_name, tags, animated FROM stickers WHERE folder_name = $1 ORDER BY position NULLS LAST, id LIMIT $2"
     )
     .bind(&params.folder_name)
     .bind(limit)
@@ -1166,5 +1241,41 @@ async fn dev_blob_handler(State(state): State<Arc<AppState>>, Path(path): Path<S
     match tokio::fs::read(&file).await {
         Ok(bytes) => ([(header::CONTENT_TYPE, content_type)], bytes).into_response(),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{user_sync_summary, RunningUserSyncs};
+    use std::sync::Arc;
+
+    #[test]
+    fn a_creator_syncs_once_at_a_time() {
+        let syncs = Arc::new(RunningUserSyncs::default());
+
+        let running = RunningUserSyncs::begin(&syncs, "xQc").expect("the first sync starts");
+        assert!(RunningUserSyncs::begin(&syncs, "xQc").is_none());
+        assert!(RunningUserSyncs::begin(&syncs, "Vinesauce").is_some());
+
+        drop(running);
+        assert!(RunningUserSyncs::begin(&syncs, "xQc").is_some());
+    }
+
+    #[test]
+    fn user_sync_summary_mentions_only_what_happened() {
+        assert_eq!(
+            user_sync_summary("Emotes", 120, 0, 0, 0),
+            "Synced 120 emotes from the 7TV set \"Emotes\""
+        );
+        assert_eq!(
+            user_sync_summary("Dona emotes", 77, 1, 0, 1),
+            "Synced 77 emotes from the 7TV set \"Dona emotes\", skipped 1 zero-width, \
+             removed 1 sticker no longer in the set"
+        );
+        assert_eq!(
+            user_sync_summary("Halloween", 950, 34, 3, 12),
+            "Synced 950 emotes from the 7TV set \"Halloween\", skipped 34 zero-width, \
+             3 failed to download or store (see the server logs), removed 12 stickers no longer in the set"
+        );
     }
 }
