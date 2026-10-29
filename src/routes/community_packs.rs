@@ -95,6 +95,9 @@ pub struct MyCommunityPack {
     pub status: String,
     /// Stickers whose WhatsApp-ready file hasn't been uploaded yet, so the app can finish.
     pub missing_stickers: Vec<String>,
+    /// Shown to the author, so they see what their pack is doing in the app.
+    pub like_count: i32,
+    pub add_count: i32,
 }
 
 #[derive(Debug, Serialize)]
@@ -481,6 +484,8 @@ pub async fn publish_handler(
                     name,
                     status: "pending".to_string(),
                     missing_stickers: input.emotes.iter().map(|e| e.emote_id.clone()).collect(),
+                    like_count: 0,
+                    add_count: 0,
                 }),
                 message: None,
             }),
@@ -507,7 +512,7 @@ pub async fn list_approved_handler(
     list_response(load_packs(&state.db, Some("approved"), order, PUBLIC_LIMIT, device_id).await)
 }
 
-/// Public: the review status of the packs this install published.
+/// Public: the review status, likes and adds of the packs this install published.
 pub async fn my_packs_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<DeviceQuery>,
@@ -524,7 +529,7 @@ pub async fn my_packs_handler(
     }
 
     let rows = sqlx::query_as::<_, MyCommunityPack>(
-        "SELECT p.id, p.name, p.status,
+        "SELECT p.id, p.name, p.status, p.like_count, p.add_count,
                 ARRAY(
                     SELECT i.emote_id FROM community_pack_items i
                     WHERE i.pack_id = p.id AND i.sticker_url IS NULL
