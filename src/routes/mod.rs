@@ -15,11 +15,14 @@ use crate::models::{TrendingPeriod, SearchResponse, SyncTrendingRequest, SyncUse
 use serde::{Deserialize, Serialize};
 
 mod auth;
+mod bulk_user_sync;
 mod community_packs;
 mod creator_requests;
 mod dashboard;
 mod starter_packs;
 mod sticker_files;
+
+pub use bulk_user_sync::BulkUserSync;
 
 pub fn create_router(state: Arc<AppState>) -> Router {
     let public = Router::new()
@@ -73,6 +76,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/admin/dashboard", get(dashboard::dashboard_handler))
         .route("/api/admin/sync-trending", post(sync_trending_handler))
         .route("/api/admin/sync-user-emotes", post(sync_user_emotes_handler))
+        .route(
+            "/api/admin/sync-all-users",
+            get(bulk_user_sync::status_handler).post(bulk_user_sync::start_handler),
+        )
+        .route("/api/admin/sync-all-users/stop", post(bulk_user_sync::stop_handler))
         .route("/api/admin/users/:folder_name/image", patch(update_user_image_handler))
         .route("/api/admin/users/:folder_name", delete(delete_user_handler))
         .route(
@@ -763,8 +771,18 @@ async fn sync_user_emotes_handler(
         );
     };
 
-    // A big set takes minutes to sync. It runs in its own task so it still finishes and saves
-    // when the dashboard or a proxy drops this request.
+    spawn_user_sync(state, guard, user_id, folder, image_url).await
+}
+
+/// A big set takes minutes to sync. It runs in its own task so it still finishes and saves
+/// when the dashboard or a proxy drops the request.
+async fn spawn_user_sync(
+    state: Arc<AppState>,
+    guard: UserSyncGuard,
+    user_id: String,
+    folder: String,
+    image_url: Option<String>,
+) -> (StatusCode, Json<SearchResponse>) {
     let sync = tokio::spawn(async move {
         let _running = guard;
         sync_user_emotes(&state, &user_id, &folder, image_url).await

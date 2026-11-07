@@ -181,6 +181,44 @@
                         </div>
                     </div>
 
+                    <!-- Sync of all creators -->
+                    <div class="mb-4 p-3 rounded-lg bg-gray-800/50 border border-gray-700">
+                        <div class="flex flex-wrap items-center justify-between gap-3">
+                            <div class="min-w-0 flex-1">
+                                <div class="text-sm font-medium text-white">Sync all creators</div>
+                                <p class="text-xs text-gray-500">
+                                    Runs on the server, one creator at a time, and can take hours. You can close this page.
+                                    A deploy or restart stops it: start it again skipping the last 24 h to carry on.
+                                </p>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <select id="bulkSyncSkip"
+                                    class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-white text-sm focus:outline-none focus:border-blue-500">
+                                    <option value="0">All creators</option>
+                                    <option value="24">Skip synced in the last 24 h</option>
+                                </select>
+                                <button id="bulkSyncStart" onclick="startBulkSync()"
+                                    class="btn bg-purple-600 hover:bg-purple-500 text-white px-4 py-1.5 rounded-lg text-sm">
+                                    Sync all
+                                </button>
+                                <button id="bulkSyncStop" onclick="stopBulkSync()"
+                                    class="hidden btn bg-red-600/20 hover:bg-red-600 hover:text-white text-red-400 border border-red-600/40 px-4 py-1.5 rounded-lg text-sm">
+                                    Stop
+                                </button>
+                            </div>
+                        </div>
+                        <div id="bulkSyncProgress" class="hidden mt-3">
+                            <div class="flex flex-wrap justify-between gap-2 text-xs mb-1">
+                                <span id="bulkSyncLabel" class="text-white"></span>
+                                <span id="bulkSyncCount" class="text-gray-400"></span>
+                            </div>
+                            <div class="h-1.5 bg-gray-700 rounded overflow-hidden">
+                                <div id="bulkSyncBar" class="h-full bg-purple-500 transition-all" style="width: 0"></div>
+                            </div>
+                            <div id="bulkSyncOutcomes" class="mt-2 space-y-1 max-h-40 overflow-y-auto pr-1"></div>
+                        </div>
+                    </div>
+
                     <!-- Sub-panel: Add -->
                     <div id="subpanel-add" class="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
                         <div>
@@ -1421,6 +1459,123 @@
             }
         }
 
+        // The sync of all creators runs on the server: the page only starts it, stops it and
+        // shows how it's going.
+        let bulkSyncWasRunning = false;
+        let bulkSyncPoll = null;
+
+        async function startBulkSync() {
+            const skipHours = Number(document.getElementById('bulkSyncSkip').value);
+            const scope = skipHours ? `creators not synced in the last ${skipHours} h` : 'every creator';
+            const question = `Sync ${scope}? It can take hours. ` +
+                'Each catalog will match the 7TV set the creator has active right now.';
+            if (!window.confirm(question)) return;
+
+            try {
+                const response = await fetch('/api/admin/sync-all-users', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ skipSyncedWithinHours: skipHours })
+                });
+                const data = await response.json();
+                log(escapeHtml(data.message), response.ok || response.status === 409 ? 'info' : 'error');
+            } catch (err) {
+                log(`Network Error: ${escapeHtml(err.message)}`, 'error');
+            }
+            refreshBulkSync();
+        }
+
+        async function stopBulkSync() {
+            try {
+                const response = await fetch('/api/admin/sync-all-users/stop', { method: 'POST' });
+                const data = await response.json();
+                log(escapeHtml(data.message), 'info');
+            } catch (err) {
+                log(`Network Error: ${escapeHtml(err.message)}`, 'error');
+            }
+            refreshBulkSync();
+        }
+
+        async function refreshBulkSync() {
+            clearTimeout(bulkSyncPoll);
+            let status = null;
+            try {
+                const response = await fetch('/api/admin/sync-all-users');
+                if (response.ok) status = await response.json();
+            } catch (err) {
+                console.warn('Could not read the sync of all creators', err);
+            }
+
+            if (status) {
+                renderBulkSync(status);
+                if (status.running && !bulkSyncWasRunning) {
+                    log(`Sync of all creators running: ${status.outcomes.length} of ${status.total} done. ` +
+                        'Progress is in the User Sync tab.', 'loading');
+                }
+                if (!status.running && bulkSyncWasRunning) announceBulkSyncEnd(status);
+                bulkSyncWasRunning = status.running;
+            }
+            // A failed read keeps polling, so the page notices when a deploy restarts the server.
+            if (bulkSyncWasRunning) bulkSyncPoll = setTimeout(refreshBulkSync, 5000);
+        }
+
+        function announceBulkSyncEnd(status) {
+            if (!status.startedAt) {
+                log('The server restarted and stopped the sync of all creators. ' +
+                    'Start it again skipping the last 24 h to carry on.', 'error');
+                return;
+            }
+            const failed = status.outcomes.filter(o => !o.success).length;
+            const verb = status.stopRequested ? 'stopped' : 'finished';
+            log(`Sync of all creators ${verb}: ${status.outcomes.length} of ${status.total} done, ${failed} failed.`,
+                failed ? 'error' : 'success');
+            loadUsersList();
+        }
+
+        function formatDuration(seconds) {
+            if (seconds < 60) return `${seconds}s`;
+            return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+        }
+
+        function renderBulkSync(status) {
+            document.getElementById('bulkSyncStart').classList.toggle('hidden', status.running);
+            document.getElementById('bulkSyncSkip').classList.toggle('hidden', status.running);
+            const stopBtn = document.getElementById('bulkSyncStop');
+            stopBtn.classList.toggle('hidden', !status.running);
+            stopBtn.disabled = status.stopRequested;
+
+            document.getElementById('bulkSyncProgress').classList.toggle('hidden', !status.startedAt);
+            if (!status.startedAt) return;
+
+            const done = status.outcomes.length;
+            const failed = status.outcomes.filter(o => !o.success).length;
+            const failedNote = failed ? ` · ${failed} failed` : '';
+            document.getElementById('bulkSyncBar').style.width = `${(done / status.total) * 100}%`;
+
+            let label;
+            if (status.running) {
+                const current = status.current || 'the next creator';
+                label = status.stopRequested ? `Stopping after ${current}...` : `Syncing ${current}...`;
+            } else {
+                label = status.stopRequested ? 'Stopped' : 'Finished';
+            }
+            const moment = status.running
+                ? `started ${formatRelative(status.startedAt)}`
+                : `ended ${formatRelative(status.finishedAt)}`;
+            document.getElementById('bulkSyncLabel').textContent = label;
+            document.getElementById('bulkSyncCount').textContent =
+                `${done} of ${status.total}${failedNote} · ${moment}`;
+
+            // Messages carry 7TV set names, so they go in as text.
+            const rows = [...status.outcomes].reverse().map(outcome => {
+                const row = document.createElement('div');
+                row.className = `text-xs ${outcome.success ? 'text-gray-400' : 'text-red-400'}`;
+                row.textContent = `${outcome.folderName} (${formatDuration(outcome.seconds)}): ${outcome.message}`;
+                return row;
+            });
+            document.getElementById('bulkSyncOutcomes').replaceChildren(...rows);
+        }
+
         function askDeleteUser(folderName, displayName) {
             pendingDeleteFolder = folderName;
             document.getElementById('deleteUserTarget').textContent = `${displayName} (${folderName})`;
@@ -1622,6 +1777,7 @@
             loadPreview();
             refreshRequestsBadge();
             refreshCommunityBadge();
+            refreshBulkSync();
         });
     </script>
 </body>

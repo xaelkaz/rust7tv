@@ -42,6 +42,7 @@ async fn main() {
         seventv,
         db: pool,
         user_syncs: Arc::new(routes::RunningUserSyncs::default()),
+        bulk_user_sync: routes::BulkUserSync::default(),
     };
 
     let shared_state = Arc::new(app_state);
@@ -62,5 +63,6 @@ pub struct AppState {
     pub seventv: Arc<services::seventv::SevenTVService>,
     pub db: sqlx::Pool<sqlx::Postgres>,
     pub user_syncs: Arc<routes::RunningUserSyncs>,
+    pub bulk_user_sync: routes::BulkUserSync,
 }
 
